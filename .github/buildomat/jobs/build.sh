@@ -1,6 +1,6 @@
 #!/bin/bash
 #:
-#: name = "build"
+#: name = "build-tests"
 #: variety = "basic"
 #: target = "helios"
 #: rust_toolchain = "nightly"
@@ -18,9 +18,9 @@ set -o xtrace
 cargo --version
 rustc --version
 
-banner 'BuildBins'
-ptime -m cargo build --verbose --bins \
-    --message-format json-render-diagnostics >/tmp/output.build.json
+#banner 'BuildBins'
+#ptime -m cargo build --verbose --bins \
+#    --message-format json-render-diagnostics >/tmp/output.build.json
 
 banner 'BuildTests'
 ptime -m cargo build --verbose --tests \
@@ -41,11 +41,11 @@ function artefacts_from {
 		| .[]" "$1"
 }
 
-banner 'SaveBins'
-mkdir -p /work/bins
-artefacts_from /tmp/output.build.json bin | while read a; do
-	ptime -m gzip < "$a" > "/work/bins/$(basename "$a").gz"
-done
+#banner 'SaveBins'
+#mkdir -p /work/bins
+#artefacts_from /tmp/output.build.json bin | while read a; do
+#	ptime -m gzip < "$a" > "/work/bins/$(basename "$a").gz"
+#done
 
 banner 'SaveTests'
 mkdir -p /work/tests
