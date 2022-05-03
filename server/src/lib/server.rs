@@ -10,6 +10,7 @@ use futures::{FutureExt, SinkExt, StreamExt};
 use hyper::upgrade::{self, Upgraded};
 use hyper::{header, Body, Response, StatusCode};
 use propolis::hw::qemu::ramfb::RamFb;
+use rfb::pixel_formats::fourcc;
 use rfb::server::VncServer;
 use slog::{error, info, o, Logger};
 use std::borrow::Cow;
@@ -489,8 +490,8 @@ async fn instance_ensure(
 
     // Initialize framebuffer data for the VNC server.
     let vnc_hdl = Arc::clone(&server_context.vnc_server);
-    let (addr, width, height) = ramfb.as_ref().unwrap().get_framebuffer_info();
-    let fb = vnc::RamFb::new(addr, width, height);
+    let fb_spec = ramfb.as_ref().unwrap().get_framebuffer_spec();
+    let fb = vnc::RamFb::new(fb_spec.clone());
     let actx = instance.async_ctx();
     let vnc_server = vnc_hdl.lock().await;
     vnc_server.server.set_async_ctx(actx).await;
@@ -502,7 +503,7 @@ async fn instance_ensure(
         let h = Arc::clone(&hdl);
         rt.block_on(async move {
             let vnc = h.lock().await;
-            vnc.server.update(config, is_valid).await;
+            vnc.server.update(&vnc, config, is_valid).await;
         });
     }));
 

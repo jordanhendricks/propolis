@@ -73,11 +73,12 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
             let config_logging = ConfigLogging::StderrTerminal {
-                level: ConfigLoggingLevel::Info,
+                level: ConfigLoggingLevel::Debug,
             };
             let log = config_logging.to_logger("propolis-server").map_err(
                 |error| anyhow!("failed to create logger: {}", error),
             )?;
+            env_logger::init();
 
             let vnc_server = setup_vnc(&log, vnc_addr);
             let vnc_server_hdl = vnc_server.clone();
