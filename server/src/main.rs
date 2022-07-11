@@ -4,6 +4,8 @@
     feature(asm_sym)
 )]
 
+use env_logger;
+
 use anyhow::anyhow;
 use clap::Parser;
 use dropshot::{
@@ -59,6 +61,8 @@ async fn main() -> anyhow::Result<()> {
     // Command line arguments.
     let args = Args::parse();
 
+    env_logger::init();
+
     match args {
         Args::OpenApi => run_openapi()
             .map_err(|e| anyhow!("Cannot generate OpenAPI spec: {}", e)),
@@ -72,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
             let config_logging = ConfigLogging::StderrTerminal {
-                level: ConfigLoggingLevel::Info,
+                level: ConfigLoggingLevel::Debug,
             };
             let log = config_logging.to_logger("propolis-server").map_err(
                 |error| anyhow!("failed to create logger: {}", error),

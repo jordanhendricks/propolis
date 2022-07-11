@@ -24,6 +24,7 @@ tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 crucible = { git = "https://github.com/oxidecomputer/crucible", rev = "fed3e8ca7762130ee146fc516a4ef6eed2b91629", optional = true }
 anyhow = "1"
+rfb = { git = "https://github.com/oxidecomputer/rfb", branch = "main" }
 slog = "2.7"
 serde = { version = "1" }
 serde_arrays = "0.1"

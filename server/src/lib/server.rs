@@ -32,7 +32,7 @@ use crate::config::Config;
 use crate::initializer::{build_instance, MachineInitializer};
 use crate::serial::Serial;
 use crate::spec::SpecBuilder;
-use crate::vnc::PropolisVncServer;
+use crate::vnc::{Framebuffer, PropolisVncServer};
 use crate::{migrate, vnc};
 use uuid::Uuid;
 
@@ -351,8 +351,11 @@ async fn instance_ensure(
     let fb = vnc::RamFb::new(fb_spec.clone());
     let actx = instance.async_ctx();
     let vnc_server = vnc_hdl.lock().await;
-    vnc_server.server.set_async_ctx(actx).await;
-    vnc_server.server.initialize_framebuffer(fb).await;
+    let mut inner = vnc_server.server.inner.lock().await;
+    inner.actx = Some(actx);
+    inner.framebuffer = Framebuffer::Initialized(fb);
+    inner.vnc_server = Some(vnc_server.clone());
+    drop(inner);
 
     let rt = rt_handle.unwrap();
     let hdl = Arc::clone(&vnc_hdl);
@@ -360,7 +363,7 @@ async fn instance_ensure(
         let h = Arc::clone(&hdl);
         rt.block_on(async move {
             let vnc = h.lock().await;
-            vnc.server.update(&vnc, config, is_valid).await;
+            vnc.server.update(config, is_valid).await;
         });
     }));
 
