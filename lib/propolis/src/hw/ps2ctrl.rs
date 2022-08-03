@@ -13,6 +13,7 @@ use crate::pio::{PioBus, PioFn};
 
 use erased_serde::Serialize;
 
+/// Status register
 bitflags! {
     #[derive(Default)]
     pub struct CtrlStatus: u8 {
@@ -27,6 +28,7 @@ bitflags! {
     }
 }
 
+/// Controller Configuration Byte
 bitflags! {
     #[derive(Default)]
     pub struct CtrlCfg: u8 {
@@ -35,10 +37,13 @@ bitflags! {
         const SYS_FLAG = 1 << 2;
         const PRI_CLOCK_DIS = 1 << 4;
         const AUX_CLOCK_DIS = 1 << 5;
+
+        /// Translate to Scan Code Set 1
         const PRI_XLATE_EN = 1 << 6;
     }
 }
 
+/// Controller Output Port (XXX: which port is this?)
 bitflags! {
     #[derive(Default)]
     pub struct CtrlOutPort: u8 {
@@ -55,6 +60,7 @@ bitflags! {
     }
 }
 
+// Controller commands
 const PS2C_CMD_READ_CTRL_CFG: u8 = 0x20;
 const PS2C_CMD_WRITE_CTRL_CFG: u8 = 0x60;
 const PS2C_CMD_READ_RAM_START: u8 = 0x21;
@@ -102,11 +108,11 @@ pub struct PS2Ctrl {
 }
 impl PS2Ctrl {
     pub fn create() -> Arc<Self> {
-        println!("ps2ctrl: created");
+        //println!("ps2ctrl: created");
         Arc::new(Self { state: Mutex::new(PS2State::default()) })
     }
     pub fn attach(self: &Arc<Self>, bus: &PioBus, chipset: &dyn Chipset) {
-        println!("ps2ctrl: attached");
+        //println!("ps2ctrl: attached");
         let this = Arc::clone(self);
         let piofn = Arc::new(move |port: u16, rwo: RWOp, ctx: &DispCtx| {
             this.pio_rw(port, rwo, ctx)
@@ -120,29 +126,53 @@ impl PS2Ctrl {
         state.aux_pin = Some(chipset.irq_pin(ibmpc::IRQ_PS2_AUX).unwrap());
     }
 
+    // TODO: figure out why the guest only reads one byte at a time.
+    pub fn send_key(&self, k: u8) {
+        println!("send_key: 0x{:x}", k);
+        let mut state;
+        loop {
+            state = self.state.lock().unwrap();
+            if state.pri_port.send_key(k) {
+                self.update_intr(&mut state);
+                return;
+            } else {
+                drop(state)
+            }
+        }
+        // TODO: change resp back to get loop to work
+    }
+
     fn pio_rw(&self, port: u16, rwo: RWOp, ctx: &DispCtx) {
         assert_eq!(rwo.len(), 1);
         match port {
             ibmpc::PORT_PS2_DATA => match rwo {
                 RWOp::Read(ro) => {
-                    println!("ps2ctrl pio_rw: READ from DATA (port={:#02x})", port);
+                    //println!(
+                    //"ps2ctrl pio_rw: READ from DATA (port={:#02x})",
+                    //port
+                    //);
                     ro.write_u8(self.data_read());
-                },
+                }
                 RWOp::Write(wo) => {
-                    println!("ps2ctrl pio_rw: WRITE to DATA (port={:#02x})", port);
+                    //println!(
+                    //"ps2ctrl pio_rw: WRITE to DATA (port={:#02x})",
+                    //port
+                    //);
                     self.data_write(wo.read_u8());
-                },
-            },
-            ibmpc::PORT_PS2_CMD_STATUS => match rwo {
-                RWOp::Read(ro) => {
-                    println!("ps2ctrl pio_rw: READ from CMD_STATUS (port={:#02x})", port);
-                    ro.write_u8(self.status_read());
-                }
-                RWOp::Write(wo) => {
-                    println!("ps2ctrl pio_rw: WRITE to CMD_STATUS (port={:#02x})", port);
-                    self.cmd_write(wo.read_u8(), ctx);
                 }
             },
+            ibmpc::PORT_PS2_CMD_STATUS => {
+                match rwo {
+                    RWOp::Read(ro) => {
+                        //println!("ps2ctrl pio_rw: READ from CMD_STATUS (port={:#02x})", port);
+                        ro.write_u8(self.status_read());
+                    }
+                    RWOp::Write(wo) => {
+                        //println!("ps2ctrl pio_rw: WRITE to CMD_STATUS (port={:#02x})", port);
+                        self.cmd_write(wo.read_u8(), ctx);
+                    }
+                }
+            }
             _ => {
                 panic!("unexpected pio in {:x}", port);
             }
@@ -155,29 +185,29 @@ impl PS2Ctrl {
         if let Some(prefix) = cmd_prefix {
             match prefix {
                 PS2C_CMD_WRITE_CTRL_CFG => {
-                    println!("DATA write: PS2C_CMD_WRITE_CTRL_CFG");
+                    //println!("DATA write: PS2C_CMD_WRITE_CTRL_CFG=0x{:x}", v);
                     state.ctrl_cfg = CtrlCfg::from_bits_truncate(v);
                 }
                 PS2C_CMD_WRITE_RAM_START..=PS2C_CMD_WRITE_RAM_END => {
-                    println!("DATA write: PS2C_CMD_WRITE_RAM...");
+                    //println!("DATA write: PS2C_CMD_WRITE_RAM... =0x{:x}", v);
                     let off = v - PS2C_CMD_WRITE_RAM_START;
                     state.ram[off as usize] = v;
                 }
                 PS2C_CMD_WRITE_CTLR_OUT => {
-                    println!("DATA write: PS2C_CMD_WRITE_CTLR_OUT");
+                    //println!("DATA write: PS2C_CMD_WRITE_CTLR_OUT=0x{:x}", v);
                     state.ctrl_out_port = CtrlOutPort::from_bits_truncate(v);
                     state.ctrl_out_port.remove(CtrlOutPort::DYN_FLAGS);
                 }
                 PS2C_CMD_WRITE_PRI_OUT => {
-                    println!("DATA write: PS2C_CMD_WRITE_PRI_OUT");
+                    //println!("DATA write: PS2C_CMD_WRITE_PRI_OUT=0x{:x}", v);
                     state.pri_port.loopback(v);
                 }
                 PS2C_CMD_WRITE_AUX_OUT => {
-                    println!("DATA write: PS2C_CMD_WRITE_AUX_OUT");
+                    //println!("DATA write: PS2C_CMD_WRITE_AUX_OUT=0x{:x}", v);
                     state.aux_port.loopback(v);
                 }
                 PS2C_CMD_WRITE_AUX_IN => {
-                    println!("DATA write: PS2C_CMD_WRITE_AUX_IN");
+                    //println!("DATA write: PS2C_CMD_WRITE_AUX_IN=0x{:x}", v);
                     state.aux_port.cmd_input(v);
                 }
                 _ => {
@@ -185,7 +215,7 @@ impl PS2Ctrl {
                 }
             }
         } else {
-            println!("DATA write: v={:x}", v);
+            //println!("DATA write: v=0x{:x}", v);
             state.pri_port.cmd_input(v);
         }
         self.update_intr(&mut state);
@@ -193,7 +223,7 @@ impl PS2Ctrl {
     fn data_read(&self) -> u8 {
         let mut state = self.state.lock().unwrap();
         if let Some(rval) = state.resp {
-            println!("DATA read: resp val={:x}", rval);
+            //println!("DATA read: resp val={:x}", rval);
             state.resp = None;
             rval
         } else if state.pri_port.has_output() {
@@ -204,10 +234,10 @@ impl PS2Ctrl {
         } else if state.aux_port.has_output() {
             let rval = state.aux_port.read_output().unwrap();
             self.update_intr(&mut state);
-            println!("DATA read: aux output val={:x}", rval);
+            //println!("DATA read: aux output val={:x}", rval);
             rval
         } else {
-            println!("DATA read: no data (0x0)");
+            //println!("DATA read: no data (0x0)");
             0
         }
     }
@@ -216,47 +246,62 @@ impl PS2Ctrl {
         match v {
             PS2C_CMD_READ_CTRL_CFG => {
                 state.resp = Some(state.ctrl_cfg.bits());
-                println!("CMD_STATUS write: PS2C_CMD_READ_CTRL_CFG={:x}", state.resp.unwrap());
+                //println!(
+                //"CMD_STATUS write: PS2C_CMD_READ_CTRL_CFG={:x}",
+                //state.resp.unwrap()
+                //);
             }
             PS2C_CMD_READ_RAM_START..=PS2C_CMD_READ_RAM_END => {
                 let off = v - PS2C_CMD_READ_RAM_START;
                 state.resp = Some(state.ram[off as usize]);
-                println!("CMD_STATUS write: PS2C_CMD_READ_RAM...={:x}", state.resp.unwrap());
+                //println!(
+                //"CMD_STATUS write: PS2C_CMD_READ_RAM...={:x}",
+                //state.resp.unwrap()
+                //);
             }
             PS2C_CMD_CTRL_TEST => {
                 state.resp = Some(PS2C_R_CTRL_TEST_PASS);
-                println!("CMD_STATUS write: PS2C_CMD_CTRL_TEST={:x}", state.resp.unwrap());
+                //println!(
+                //"CMD_STATUS write: PS2C_CMD_CTRL_TEST={:x}",
+                //state.resp.unwrap()
+                //);
             }
 
             PS2C_CMD_PRI_PORT_TEST => {
                 state.resp = Some(PS2C_R_PORT_TEST_PASS);
-                println!("CMD_STATUS write: PS2C_CMD_PRI_PORT_TEST={:x}", state.resp.unwrap());
+                //println!(
+                //"CMD_STATUS write: PS2C_CMD_PRI_PORT_TEST={:x}",
+                //state.resp.unwrap()
+                //);
             }
             PS2C_CMD_AUX_PORT_TEST => {
                 state.resp = Some(PS2C_R_PORT_TEST_PASS);
-                println!("CMD_STATUS write: PS2C_CMD_AUX_PORT_TEST={:x}", state.resp.unwrap());
+                //println!(
+                //"CMD_STATUS write: PS2C_CMD_AUX_PORT_TEST={:x}",
+                //state.resp.unwrap()
+                //);
             }
             PS2C_CMD_PRI_PORT_ENA | PS2C_CMD_PRI_PORT_DIS => {
                 state
                     .ctrl_cfg
                     .set(CtrlCfg::PRI_CLOCK_DIS, v == PS2C_CMD_PRI_PORT_DIS);
 
-                if v == PS2C_CMD_PRI_PORT_DIS {
-                    println!("CMD_STATUS write: PS2C_CMD_PRI_PORT_DIS");
-                } else {
-                    println!("CMD_STATUS write: PS2C_CMD_PRI_PORT_ENA");
-                }
+                //if v == PS2C_CMD_PRI_PORT_DIS {
+                //println!("CMD_STATUS write: PS2C_CMD_PRI_PORT_DIS");
+                //} else {
+                //println!("CMD_STATUS write: PS2C_CMD_PRI_PORT_ENA");
+                //}
             }
             PS2C_CMD_AUX_PORT_ENA | PS2C_CMD_AUX_PORT_DIS => {
                 state
                     .ctrl_cfg
                     .set(CtrlCfg::AUX_CLOCK_DIS, v == PS2C_CMD_AUX_PORT_DIS);
 
-                if v == PS2C_CMD_AUX_PORT_DIS {
-                    println!("CMD_STATUS write: PS2C_CMD_AUX_PORT_DIS");
-                } else {
-                    println!("CMD_STATUS write: PS2C_CMD_AUX_PORT_ENA");
-                }
+                //if v == PS2C_CMD_AUX_PORT_DIS {
+                //println!("CMD_STATUS write: PS2C_CMD_AUX_PORT_DIS");
+                //} else {
+                //println!("CMD_STATUS write: PS2C_CMD_AUX_PORT_ENA");
+                //}
             }
 
             PS2C_CMD_READ_CTLR_OUT => {
@@ -264,7 +309,10 @@ impl PS2Ctrl {
                 val.set(CtrlOutPort::PRI_FULL, state.pri_port.has_output());
                 val.set(CtrlOutPort::AUX_FULL, state.aux_port.has_output());
                 state.resp = Some(val.bits());
-                println!("CMD_STATUS write: PS2C_CMD_READ_CTLR_OUT={:x}", state.resp.unwrap());
+                //println!(
+                //"CMD_STATUS write: PS2C_CMD_READ_CTLR_OUT={:x}",
+                //state.resp.unwrap()
+                //);
             }
 
             // commands with a following byte to complete
@@ -274,26 +322,39 @@ impl PS2Ctrl {
             | PS2C_CMD_WRITE_AUX_OUT
             | PS2C_CMD_WRITE_AUX_IN
             | PS2C_CMD_WRITE_RAM_START..=PS2C_CMD_WRITE_RAM_END => {
-
-                if v == PS2C_CMD_WRITE_CTRL_CFG {
-                    println!("CMD_STATUS write (multibyte): PS2C_CMD_WRITE_CTLR_CFG");
-                } else if v == PS2C_CMD_WRITE_CTLR_OUT {
-                    println!("CMD_STATUS write (multibyte): PS2C_CMD_WRITE_CTLR_OUT");
-                } else if v == PS2C_CMD_WRITE_PRI_OUT {
-                    println!("CMD_STATUS write (multibyte): PS2C_CMD_WRITE_PRI_OUT");
-                } else if v == PS2C_CMD_WRITE_AUX_OUT {
-                    println!("CMD_STATUS write (multibyte): PS2C_CMD_WRITE_AUX_OUT");
-                } else if v == PS2C_CMD_WRITE_AUX_IN {
-                    println!("CMD_STATUS write (multibyte): PS2C_CMD_WRITE_AUX_IN");
-                } else if v >= PS2C_CMD_WRITE_RAM_START && v <= PS2C_CMD_WRITE_RAM_END {
-                    println!("CMD_STATUS write (multibyte): PS2C_CMD_WRITE_RAM...");
-                }
+                //if v == PS2C_CMD_WRITE_CTRL_CFG {
+                //println!(
+                //"CMD_STATUS write (multibyte): PS2C_CMD_WRITE_CTLR_CFG"
+                //);
+                //} else if v == PS2C_CMD_WRITE_CTLR_OUT {
+                //println!(
+                //"CMD_STATUS write (multibyte): PS2C_CMD_WRITE_CTLR_OUT"
+                //);
+                //} else if v == PS2C_CMD_WRITE_PRI_OUT {
+                //println!(
+                //"CMD_STATUS write (multibyte): PS2C_CMD_WRITE_PRI_OUT"
+                //);
+                //} else if v == PS2C_CMD_WRITE_AUX_OUT {
+                //println!(
+                //"CMD_STATUS write (multibyte): PS2C_CMD_WRITE_AUX_OUT"
+                //);
+                //} else if v == PS2C_CMD_WRITE_AUX_IN {
+                //println!(
+                //"CMD_STATUS write (multibyte): PS2C_CMD_WRITE_AUX_IN"
+                //);
+                //} else if v >= PS2C_CMD_WRITE_RAM_START
+                //&& v <= PS2C_CMD_WRITE_RAM_END
+                //{
+                //println!(
+                //"CMD_STATUS write (multibyte): PS2C_CMD_WRITE_RAM..."
+                //);
+                //}
 
                 state.cmd_prefix = Some(v);
             }
 
             PS2C_CMD_PULSE_START..=PS2C_CMD_PULSE_END => {
-                println!("CMD_STATUS write: PS2C_CMD_PULSE...");
+                //println!("CMD_STATUS write: PS2C_CMD_PULSE...");
                 let to_pulse = v - PS2C_CMD_PULSE_START;
                 if to_pulse == 0xe {
                     ctx.trigger_suspend(
@@ -304,7 +365,7 @@ impl PS2Ctrl {
             }
 
             _ => {
-                println!("CMD_STATUS write: unrecognized command");
+                //println!("CMD_STATUS write: unrecognized command");
                 // ignore all other unrecognized commands
             }
         }
@@ -327,11 +388,11 @@ impl PS2Ctrl {
             state.ctrl_cfg.contains(CtrlCfg::SYS_FLAG),
         );
 
-        println!("CMD_STATUS read: read val={:x}", val.bits());
+        //println!("CMD_STATUS read: read val={:x}", val.bits());
         val.bits()
     }
     fn update_intr(&self, state: &mut PS2State) {
-        println!("ps2ctrl: update_intr");
+        //println!("ps2ctrl: update_intr");
         // We currently choose to mimic qemu, which gates the keyboard interrupt
         // with the keyboard-clock-disable in addition to the interrupt enable.
         let pri_pin = state.pri_pin.as_ref().unwrap();
@@ -340,14 +401,23 @@ impl PS2Ctrl {
                 && !state.ctrl_cfg.contains(CtrlCfg::PRI_CLOCK_DIS)
                 && state.pri_port.has_output(),
         );
+        //println!("ps2ctrl: pri enabled?={}, pri clock enabled?={}, pri port has output?={}",
+        //   state.ctrl_cfg.contains(CtrlCfg::PRI_INTR_EN),
+        //  !state.ctrl_cfg.contains(CtrlCfg::PRI_CLOCK_DIS),
+        // state.pri_port.has_output());
         let aux_pin = state.aux_pin.as_ref().unwrap();
         aux_pin.set_state(
             state.ctrl_cfg.contains(CtrlCfg::AUX_INTR_EN)
                 && state.aux_port.has_output(),
         );
+        //println!(
+        //   "ps2ctrl: aux enabled?={}, aux port has output?={}",
+        //  state.ctrl_cfg.contains(CtrlCfg::AUX_INTR_EN),
+        // state.aux_port.has_output()
+        //);
     }
     fn reset(&self) {
-        println!("ps2ctrl: reset");
+        //println!("ps2ctrl: reset");
         let mut state = self.state.lock().unwrap();
         state.pri_port.reset();
         state.aux_port.reset();
@@ -366,6 +436,7 @@ impl Entity for PS2Ctrl {
         "lpc-ps2ctrl"
     }
     fn reset(&self, _ctx: &DispCtx) {
+        //println!("ps2ctrl: entity reset");
         PS2Ctrl::reset(self);
     }
     fn migrate(&self) -> Migrator {
@@ -529,7 +600,11 @@ impl PS2Kbd {
             scan_code_set: PS2ScanCodeSet::Set1,
         }
     }
+    fn send_key(&mut self, k: u8) -> bool {
+        self.resp(k)
+    }
     fn cmd_input(&mut self, v: u8) {
+        println!("ps2kbd: cmd_input={:x}", v);
         if let Some(cmd) = self.cur_cmd {
             self.cur_cmd = None;
             match cmd {
@@ -608,20 +683,31 @@ impl PS2Kbd {
             }
         }
     }
-    fn resp(&mut self, v: u8) {
+    fn resp(&mut self, v: u8) -> bool {
+        // 16 is buf size
         let remain = PS2_KBD_BUFSZ - self.buf.len();
+
+        if remain != PS2_KBD_BUFSZ {
+            return false;
+        }
+
         match remain {
             0 => {
+                //println!("ps2kbd: buf overrun v={:x}", v);
                 // overrun already in progress, do nothing
             }
             1 => {
                 // indicate overflow instead
+                //println!("ps2kbd: buf overflow v={:x}", v);
                 self.buf.push_back(0xff)
             }
             _ => {
+                //println!("ps2kbd: inserting v={:x} ({} remain", v, remain);
                 self.buf.push_back(v);
             }
         }
+
+        true
     }
     fn reset(&mut self) {
         // XXX  what should the defaults be?
@@ -701,6 +787,7 @@ impl PS2Mouse {
         }
     }
     fn cmd_input(&mut self, v: u8) {
+        //println!("ps2mouse: cmd_input={:x}", v);
         if let Some(cmd) = self.cur_cmd {
             self.cur_cmd = None;
             match cmd {

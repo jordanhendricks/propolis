@@ -2,14 +2,16 @@ use async_trait::async_trait;
 use propolis::common::GuestAddr;
 use propolis::dispatch::AsyncCtx;
 use propolis::hw::qemu::ramfb::{Config, FramebufferSpec};
-use rfb::encodings::RawEncoding;
+use rfb::encodings::{RawEncoding, ZRLE};
 use rfb::pixel_formats::fourcc;
 use rfb::rfb::{
     FramebufferUpdate, ProtoVersion, Rectangle, SecurityType, SecurityTypes,
 };
 use rfb::server::{Server, VncServer, VncServerConfig, VncServerData};
+use rfb::util::diff;
 use slog::{debug, error, info, o, Logger};
 use std::net::SocketAddr;
+use std::ops::DerefMut;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -46,6 +48,9 @@ struct PropolisVncServerInner {
     framebuffer: Framebuffer,
     actx: Option<AsyncCtx>,
     vnc_server: Option<VncServer<PropolisVncServer>>,
+    ps2ctrl: Option<Arc<propolis::hw::ps2ctrl::PS2Ctrl>>,
+
+    last_frame: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -64,6 +69,9 @@ impl PropolisVncServer {
                 }),
                 actx: None,
                 vnc_server: None,
+                ps2ctrl: None,
+
+                last_frame: None,
             })),
             log,
         }
@@ -74,11 +82,13 @@ impl PropolisVncServer {
         fb: RamFb,
         actx: AsyncCtx,
         vnc_server: VncServer<Self>,
+        ps2ctrl: Arc<propolis::hw::ps2ctrl::PS2Ctrl>,
     ) {
         let mut inner = self.inner.lock().await;
         inner.framebuffer = Framebuffer::Initialized(fb);
         inner.actx = Some(actx);
         inner.vnc_server = Some(vnc_server);
+        inner.ps2ctrl = Some(ps2ctrl);
     }
 
     pub async fn update(&self, config: &Config, is_valid: bool) {
@@ -119,10 +129,12 @@ impl PropolisVncServer {
 
 #[async_trait]
 impl Server for PropolisVncServer {
-    async fn get_framebuffer_update(&self) -> FramebufferUpdate {
-        let inner = self.inner.lock().await;
+    async fn get_framebuffer_update(&self) -> Option<FramebufferUpdate> {
+        let mut inner = self.inner.lock().await;
+        let PropolisVncServerInner { last_frame, framebuffer, actx, .. } =
+            inner.deref_mut();
 
-        let fb = match &inner.framebuffer {
+        let fb = match framebuffer {
             Framebuffer::Uninitialized(fb) => {
                 debug!(self.log, "framebuffer: uninitialized");
 
@@ -137,7 +149,7 @@ impl Server for PropolisVncServer {
                     fb.height,
                     Box::new(RawEncoding::new(pixels)),
                 );
-                FramebufferUpdate::new(vec![r])
+                Some(FramebufferUpdate::new(vec![r]))
             }
             Framebuffer::Initialized(fb) => {
                 debug!(self.log, "framebuffer initialized: fb={:?}", fb);
@@ -145,8 +157,7 @@ impl Server for PropolisVncServer {
                 let len = fb.height as usize * fb.width as usize * 4;
                 let mut buf = vec![0u8; len];
 
-                let memctx = inner
-                    .actx
+                let memctx = actx
                     .as_ref()
                     .unwrap()
                     .dispctx()
@@ -160,18 +171,87 @@ impl Server for PropolisVncServer {
                 assert!(read.is_some());
                 debug!(self.log, "read {} bytes from guest", read.unwrap());
 
-                let r = Rectangle::new(
-                    0,
-                    0,
-                    fb.width as u16,
-                    fb.height as u16,
-                    Box::new(RawEncoding::new(buf)),
-                );
-                FramebufferUpdate::new(vec![r])
+                match last_frame {
+                    Some(old) => {
+                        match diff(&buf, &old, fb.width, fb.height) {
+                            Some(rect) => {
+                                *last_frame = Some(buf);
+                                let r = Rectangle::new(
+                                    rect.x_pos as u16,
+                                    rect.y_pos as u16,
+                                    rect.width as u16,
+                                    rect.height as u16,
+                                    Box::new(RawEncoding::new(rect.data)),
+                                );
+                                Some(FramebufferUpdate::new(vec![r]))
+                            }
+                            None => {
+                                // nothing to update, send a small thing so the client keeps asking
+                                /*println!("no change in framebuffer; sleeping 100ms then sending single pixel");
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                let mut data = Vec::new();
+                                data.push(buf[0]);
+                                data.push(buf[1]);
+                                data.push(buf[3]);
+                                data.push(buf[4]);
+                                let r = Rectangle::new(0, 0, 1, 0, Box::new(RawEncoding::new(data)));
+                                println!("sleep over, returning fb");
+                                Some(FramebufferUpdate::new(vec![r])) */
+
+                                println!("no change in framebuffer");
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        *last_frame = Some(buf.clone());
+
+                        let r = Rectangle::new(
+                            0,
+                            0,
+                            fb.width as u16,
+                            fb.height as u16,
+                            Box::new(RawEncoding::new(buf)),
+                        );
+                        Some(FramebufferUpdate::new(vec![r]))
+                    }
+                }
             }
         };
 
         fb
+    }
+
+    async fn keyevent(&self, ke: rfb::rfb::KeyEvent) {
+        println!("keyevent={:?}", ke);
+
+        let inner = self.inner.lock().await;
+        let ps2 = inner.ps2ctrl.as_ref();
+
+        if ps2.is_none() {
+            println!("guest not initialized; dropping..");
+            return;
+        }
+        let ps2ctrl = ps2.unwrap();
+
+        let sc = ke.key.to_scan_code_set_1();
+
+        if sc.prefix.is_some() {
+            println!("sending key prefix: 0x{:x}", sc.prefix.unwrap());
+            ps2ctrl.send_key(sc.prefix.unwrap());
+        }
+
+        if ke.is_pressed {
+            println!("sending key: 0x{:x}", sc.base_val);
+            ps2ctrl.send_key(sc.base_val);
+        } else {
+            println!(
+                "sending key: 0x{:x} | 0x80 = 0x{:x}",
+                sc.base_val,
+                sc.base_val | 0x80
+            );
+            ps2ctrl.send_key(sc.base_val | 0x80);
+        }
     }
 }
 
