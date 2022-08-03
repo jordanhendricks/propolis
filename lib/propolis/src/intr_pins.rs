@@ -117,6 +117,10 @@ impl LegacyPin {
             self.deassert();
         }
     }
+
+    pub fn do_pulse(&self) {
+        self.pulse();
+    }
 }
 impl IntrPin for LegacyPin {
     fn assert(&self) {
@@ -138,7 +142,9 @@ impl IntrPin for LegacyPin {
         }
     }
     fn pulse(&self) {
+        println!("pulse");
         let asserted = self.asserted.lock().unwrap();
+        println!("asserted={}", asserted);
         if !*asserted {
             if let Some(pic) = Weak::upgrade(&self.pic) {
                 pic.do_irq(PinOp::Pulse, self.irq);

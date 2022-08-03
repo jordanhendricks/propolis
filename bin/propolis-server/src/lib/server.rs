@@ -435,6 +435,7 @@ async fn instance_ensure(
     let mut com1 = None;
     let mut ramfb: Option<Arc<RamFb>> = None;
     let mut rt_handle = None;
+    let mut ps2ctrl: Option<Arc<propolis::hw::ps2ctrl::PS2Ctrl>> = None;
     let mut crucible_backends = BTreeMap::new();
 
     // Initialize (some) of the instance's hardware.
@@ -457,7 +458,9 @@ async fn instance_ensure(
 
             let chipset = init.initialize_chipset()?;
             com1 = Some(Arc::new(init.initialize_uart(&chipset)?));
-            init.initialize_ps2(&chipset)?;
+            let ps2_id = init.initialize_ps2(&chipset)?;
+            ps2ctrl = inv.get_concrete(ps2_id);
+
             init.initialize_qemu_debug_port()?;
             init.initialize_network_devices(&chipset)?;
             crucible_backends = init.initialize_storage_devices(
@@ -489,7 +492,15 @@ async fn instance_ensure(
     let fb = vnc::RamFb::new(fb_spec);
     let actx = instance.async_ctx();
     let vnc_server = vnc_hdl.lock().await;
-    vnc_server.server.initialize(fb, actx, vnc_server.clone()).await;
+    vnc_server
+        .server
+        .initialize(
+            fb,
+            actx,
+            vnc_server.clone(),
+            Arc::clone(ps2ctrl.as_ref().unwrap()),
+        )
+        .await;
 
     let rt = rt_handle.unwrap();
     let hdl = Arc::clone(&vnc_hdl);
