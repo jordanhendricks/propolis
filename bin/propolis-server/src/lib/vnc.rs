@@ -6,8 +6,8 @@ use propolis::Instance;
 use rfb::encodings::RawEncoding;
 use rfb::pixel_formats::fourcc;
 use rfb::rfb::{
-    FramebufferUpdate, KeyEvent, ProtoVersion, Rectangle, SecurityType,
-    SecurityTypes,
+    FramebufferUpdate, KeyEvent, PointerEvent, ProtoVersion, Rectangle,
+    SecurityType, SecurityTypes,
 };
 use rfb::server::{Server, VncServer, VncServerConfig, VncServerData};
 use slog::{debug, error, info, o, trace, Logger};
@@ -183,6 +183,18 @@ impl Server for PropolisVncServer {
             ps2.key_event(ke);
         } else {
             trace!(self.log, "guest not initialized; dropping keyevent");
+        }
+    }
+
+    async fn pointer_event(&self, pe: PointerEvent) {
+        let inner = self.inner.lock().await;
+        let ps2 = inner.ps2ctrl.as_ref();
+
+        if let Some(ps2) = ps2 {
+            trace!(self.log, "pointer_event: {:?}", pe);
+            ps2.mouse_event(pe);
+        } else {
+            trace!(self.log, "guest not initialized; dropping pointer event");
         }
     }
 }
