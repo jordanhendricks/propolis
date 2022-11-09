@@ -87,7 +87,7 @@ impl DestinationProtocol {
         self.start();
         self.sync().await?;
         self.ram_push().await?;
-        self.device_state().await?;
+        //self.device_state().await?;
         self.arch_state().await?;
         self.ram_pull().await?;
         self.finish().await?;
@@ -103,6 +103,7 @@ impl DestinationProtocol {
         self.update_state(MigrationState::Sync).await;
         let preamble: Preamble = match self.read_msg().await? {
             codec::Message::Serialized(s) => {
+                error!(self.log(), "s={:?}", s);
                 Ok(ron::de::from_str(&s).map_err(codec::ProtocolError::from)?)
             }
             msg => {
@@ -138,7 +139,7 @@ impl DestinationProtocol {
             let end = highest.min(end);
             self.send_msg(memx::make_mem_fetch(start, end, region)).await?;
             let m = self.read_msg().await?;
-            info!(self.log(), "ram_push: source xfer phase recvd {:?}", m);
+            //info!(self.log(), "ram_push: source xfer phase recvd {:?}", m);
             match m {
                 codec::Message::MemXfer(start, end, bits) => {
                     if !memx::validate_bitmap(start, end, &bits) {
@@ -172,7 +173,7 @@ impl DestinationProtocol {
         let mut highest = 0;
         loop {
             let m = self.read_msg().await?;
-            info!(self.log(), "ram_push: source xfer phase recvd {:?}", m);
+            //info!(self.log(), "ram_push: source xfer phase recvd {:?}", m);
             match m {
                 codec::Message::MemEnd(start, end) => {
                     if start != 0 || end != !0 {
@@ -233,7 +234,7 @@ impl DestinationProtocol {
         };
         self.read_ok().await?;
 
-        info!(self.log(), "Devices: {devices:#?}");
+        //info!(self.log(), "Devices: {devices:#?}");
 
         {
             let instance_guard = self.vm_controller.instance().lock();
@@ -298,8 +299,33 @@ impl DestinationProtocol {
 
     async fn arch_state(&mut self) -> Result<(), MigrateError> {
         self.update_state(MigrationState::Arch).await;
-        self.send_msg(codec::Message::Okay).await?;
-        self.read_ok().await
+
+        info!(self.log(), "arch_state");
+        let arch_state: String = match self.read_msg().await? {
+            codec::Message::Serialized(encoded) => encoded,
+            msg => {
+                error!(self.log(), "arch state: unexpected message: {msg:?}");
+                return Err(MigrateError::UnexpectedMessage);
+            }
+        };
+        info!(self.log(), "Arch State: {:?}", arch_state);
+        self.read_ok().await?;
+
+        {
+            let instance_guard = self.vm_controller.instance().lock();
+            let hdl = &instance_guard.machine().hdl;
+            info!(self.log(), "creating deserializer from arch state");
+            let mut deserializer = ron::Deserializer::from_str(&arch_state)
+                .map_err(codec::ProtocolError::from)?;
+            info!(self.log(), "creating deserializer");
+            let deserializer =
+                &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
+            info!(self.log(), "importing arch_state");
+            hdl.import(deserializer)?;
+            info!(self.log(), "done importing arch_state");
+        }
+
+        self.send_msg(codec::Message::Okay).await
     }
 
     async fn ram_pull(&mut self) -> Result<(), MigrateError> {

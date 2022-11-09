@@ -98,7 +98,8 @@ impl SourceProtocol {
         // prior to pausing.
         self.pause().await?;
         self.ram_push().await?;
-        self.device_state().await?;
+
+        //self.device_state().await?;
         self.arch_state().await?;
         self.ram_pull().await?;
         self.finish().await?;
@@ -134,7 +135,7 @@ impl SourceProtocol {
 
         loop {
             let m = self.read_msg().await?;
-            info!(self.log(), "ram_push: source xfer phase recvd {:?}", m);
+            //info!(self.log(), "ram_push: source xfer phase recvd {:?}", m);
             match m {
                 codec::Message::MemDone => break,
                 codec::Message::MemFetch(start, end, bits) => {
@@ -262,7 +263,7 @@ impl SourceProtocol {
             })?;
         }
 
-        info!(self.log(), "Device States: {device_states:#?}");
+        //info!(self.log(), "Device States: {device_states:#?}");
 
         self.send_msg(codec::Message::Serialized(
             ron::ser::to_string(&device_states)
@@ -276,8 +277,23 @@ impl SourceProtocol {
 
     async fn arch_state(&mut self) -> Result<(), MigrateError> {
         self.update_state(MigrationState::Arch).await;
-        self.read_ok().await?;
-        self.send_msg(codec::Message::Okay).await
+
+        let arch_state;
+
+        {
+            let instance_guard = self.vm_controller.instance().lock();
+            let hdl = &instance_guard.machine().hdl;
+            let raw = hdl.export()?;
+            arch_state = ron::ser::to_string(&raw)
+                .map_err(codec::ProtocolError::from)?;
+        }
+
+        info!(self.log(), "Arch State: {:?}", arch_state);
+
+        self.send_msg(codec::Message::Serialized(arch_state)).await?;
+        self.send_msg(codec::Message::Okay).await?;
+
+        self.read_ok().await
     }
 
     async fn ram_pull(&mut self) -> Result<(), MigrateError> {

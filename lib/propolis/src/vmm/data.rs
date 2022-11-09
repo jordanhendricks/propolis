@@ -60,7 +60,7 @@ pub fn read<T: Sized + Copy + Default>(
         vdx_version: version,
         vdx_flags: 0,
         vdx_len: std::mem::size_of::<T>() as u32,
-        vdx_result_len: 0,
+        vdx_result_len: 1,
         vdx_data: &mut data as *mut T as *mut c_void,
     };
     let bytes_read = ioctl_xlate(hdl, bhyve_api::VM_DATA_READ, &mut xfer)?;
