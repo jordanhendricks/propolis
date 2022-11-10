@@ -32,7 +32,7 @@ pub struct vdi_version_entry_v1 {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize)]
 pub struct vdi_field_entry_v1 {
     pub vfe_ident: u32,
     pub _pad: u32,

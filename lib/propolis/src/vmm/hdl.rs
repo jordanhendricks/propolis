@@ -452,9 +452,12 @@ impl VmmHdl {
         &self,
         deserializer: &mut dyn Deserializer,
     ) -> std::result::Result<(), MigrateStateError> {
+        println!("import");
         let deserialized: migrate::BhyveVmV1 =
             erased_serde::deserialize(deserializer)?;
+        println!("deserialized");
         deserialized.write(self)?;
+        println!("written");
         Ok(())
     }
 
@@ -562,6 +565,7 @@ pub mod migrate {
                 .filter(|e| e.ident != bhyve_api::VAI_TSC_FREQ)
                 .map(From::from)
                 .collect();
+            println!("writing, arch_entries={:?}", arch_entries);
             vmm::data::write_many(
                 hdl,
                 -1,

@@ -41,7 +41,10 @@ fn ioctl_xlate(
             Some(errno) if errno == libc::ENOSPC => {
                 Err(VmmDataError::SpaceNeeded(xfer.vdx_result_len))
             }
-            _ => Err(VmmDataError::IoError(e)),
+            _ => {
+                println!("vmmdata error");
+                Err(VmmDataError::IoError(e))
+            }
         },
         Ok(_) => Ok(xfer.vdx_result_len),
     }

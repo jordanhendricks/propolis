@@ -87,7 +87,7 @@ impl DestinationProtocol {
         self.start();
         self.sync().await?;
         self.ram_push().await?;
-        //self.device_state().await?;
+        self.device_state().await?;
         self.arch_state().await?;
         self.ram_pull().await?;
         self.finish().await?;
