@@ -112,9 +112,18 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|error| anyhow!("Failed to start server: {}", error))?
             .start();
 
-            let server_res = join!(server, vnc_server_hdl.start()).0;
+            tokio::select! {
+                server_res = server => {
+                    return server_res.map_err(|e| anyhow!("Server exited with an error: {}", e));
+                },
+                _ = vnc_server_hdl.start() => {
+                    return Ok(())
+                }
+            }
+
+            /*let server_res = join!(server, vnc_server_hdl.start()).0;
             server_res
-                .map_err(|e| anyhow!("Server exited with an error: {}", e))
+                .map_err(|e| anyhow!("Server exited with an error: {}", e))*/
         }
     }
 }

@@ -320,7 +320,7 @@ impl SourceProtocol {
         let step = bits.len() * 8 * 4096;
         for gpa in (vmm_range.start().0..vmm_range.end().0).step_by(step) {
             self.track_dirty(GuestAddr(gpa), &mut bits).await?;
-            assert!(bits.iter().all(|&b| b == 0));
+            //assert!(bits.iter().all(|&b| b == 0));
         }
 
         Ok(())
