@@ -65,8 +65,11 @@ impl SourceBuffer {
         if buf.is_empty() {
             return Some(0);
         }
+        println!("read");
         if self.poll_active.load(Ordering::Acquire) {
+            println!("read: delaying");
             let _ = self.leading_delay().await;
+            println!("read: delay done");
         }
         loop {
             let nread = self.read_data(buf, source);
@@ -81,10 +84,12 @@ impl SourceBuffer {
     /// If we are polling this Source and the buffer is not full, we may want to
     /// wait to let it fill further so we make fewer trips back and forth.
     async fn leading_delay(&self) -> Option<Duration> {
+        println!("leading_delay())");
         let last_poll = {
             let inner = self.inner.lock().unwrap();
             // No delay if already full
             if inner.is_full() {
+                println!("leading_delay(): inner full, returning");
                 return None;
             }
             let last = inner.last_poll;
@@ -94,7 +99,9 @@ impl SourceBuffer {
 
         if let Some(since) = last_poll.map(|t| Instant::now().duration_since(t))
         {
+            println!("leading_delay(): since={:?}", since);
             if let Some(diff) = self.params.poll_interval.checked_sub(since) {
+                println!("leading_delay(): diff={:?}", diff);
                 tokio::select! {
                     _ = sleep(diff) => {},
                     _ = self.data_ready.notified() => {},
