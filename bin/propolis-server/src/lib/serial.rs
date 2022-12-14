@@ -176,7 +176,7 @@ pub async fn instance_serial_task(
 
             // Read bytes from the UART to be transmitted out the WS
             nread = uart_read => {
-                probes::serial_uart_write!(|| { nread.unwrap() });
+                probes::serial_uart_read!(|| { nread.unwrap() });
                 match nread {
                     Some(0) | None => break,
                     Some(n) => { cur_output = Some(0..n) }
