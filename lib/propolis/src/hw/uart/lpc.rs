@@ -11,6 +11,14 @@ use erased_serde::Serialize;
 
 pub const REGISTER_LEN: usize = 8;
 
+#[usdt::provider(provider = "propolis")]
+mod probes {
+    use usdt::provider;
+
+    fn lpcuart_pio_read() {}
+    fn lpcuart_pio_write() {}
+}
+
 struct UartState {
     uart: Uart,
     irq_pin: Box<dyn IntrPin>,
@@ -60,9 +68,11 @@ impl LpcUart {
 
         match rwo {
             RWOp::Read(ro) => {
+                probes::lpcuart_pio_read!(|| {});
                 ro.write_u8(state.uart.reg_read(ro.offset() as u8));
             }
             RWOp::Write(wo) => {
+                probes::lpcuart_pio_write!(|| {});
                 state.uart.reg_write(wo.offset() as u8, wo.read_u8());
             }
         }
