@@ -2,6 +2,12 @@ use std::collections::VecDeque;
 
 use bits::*;
 
+#[usdt::provider(provider = "propolis")]
+mod probes {
+    fn uart_reg_read(offset: u8) {}
+    fn uart_reg_write(offset: u8, data: u8) {}
+}
+
 pub struct Uart {
     reg_intr_enable: u8,
     reg_intr_status: u8,
@@ -44,6 +50,7 @@ impl Uart {
     }
     /// Read UART register
     pub fn reg_read(&mut self, offset: u8) -> u8 {
+        probes::uart_reg_read!(|| offset);
         match (offset, self.is_dlab()) {
             (REG_RHR, false) => {
                 if let Some(d) = self.rx_fifo.read() {
@@ -80,6 +87,7 @@ impl Uart {
     }
     /// Write UART register
     pub fn reg_write(&mut self, offset: u8, data: u8) {
+        probes::uart_reg_write!(|| (offset, data));
         match (offset, self.is_dlab()) {
             (REG_THR, false) => {
                 if !self.is_loopback() {
