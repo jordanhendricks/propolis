@@ -17,6 +17,7 @@ mod probes {
 
     fn lpcuart_pio_read() {}
     fn lpcuart_pio_write() {}
+    fn lpcuart_attach(port: u16) {}
 }
 
 struct UartState {
@@ -54,6 +55,7 @@ impl LpcUart {
         })
     }
     pub fn attach(self: &Arc<Self>, bus: &PioBus, port: u16) {
+        probes::lpcuart_attach!(|| port);
         let this = self.clone();
         let piofn = Arc::new(move |_port: u16, rwo: RWOp| this.pio_rw(rwo))
             as Arc<PioFn>;
