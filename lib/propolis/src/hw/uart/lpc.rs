@@ -120,7 +120,7 @@ impl Sink for LpcUart {
 }
 impl Source for LpcUart {
     fn read(&self) -> Option<u8> {
-        probes::lpcuart_source_read!(||);
+        probes::lpcuart_source_read!(|| {});
         let mut state = self.state.lock().unwrap();
         let res = state.uart.data_read();
         state.sync_intr_pin();
