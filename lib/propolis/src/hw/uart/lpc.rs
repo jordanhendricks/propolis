@@ -18,6 +18,8 @@ mod probes {
     fn lpcuart_pio_read() {}
     fn lpcuart_pio_write() {}
     fn lpcuart_attach(port: u16) {}
+    fn lpcuart_sink_write(data: u8) {}
+    fn lpcuart_source_read(data: u8) {}
 }
 
 struct UartState {
