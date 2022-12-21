@@ -19,7 +19,7 @@ mod probes {
     fn lpcuart_pio_write() {}
     fn lpcuart_attach(port: u16) {}
     fn lpcuart_sink_write(data: u8) {}
-    fn lpcuart_source_read(data: u8) {}
+    fn lpcuart_source_read() {}
 }
 
 struct UartState {
@@ -108,6 +108,7 @@ impl LpcUart {
 
 impl Sink for LpcUart {
     fn write(&self, data: u8) -> bool {
+        probes::lpcuart_sink_write!(|| data);
         let mut state = self.state.lock().unwrap();
         let res = state.uart.data_write(data);
         state.sync_intr_pin();
@@ -119,6 +120,7 @@ impl Sink for LpcUart {
 }
 impl Source for LpcUart {
     fn read(&self) -> Option<u8> {
+        probes::lpcuart_source_read!(||);
         let mut state = self.state.lock().unwrap();
         let res = state.uart.data_read();
         state.sync_intr_pin();
