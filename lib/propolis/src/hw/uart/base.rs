@@ -6,7 +6,12 @@ use bits::*;
 mod probes {
     fn uart_reg_read(offset: u8) {}
     fn uart_reg_write(offset: u8, data: u8) {}
+    fn uart_reg_thre_intr(enabled: u8) {}
 }
+
+/*
+ * 16550 UART
+ */
 
 pub struct Uart {
     reg_intr_enable: u8,
@@ -21,6 +26,7 @@ pub struct Uart {
     reg_div_low: u8,
     reg_div_high: u8,
 
+    // Transmitter Holding Register empty interrupt
     thre_intr: bool,
     intr_pin: bool,
 
@@ -51,6 +57,15 @@ impl Uart {
     /// Read UART register
     pub fn reg_read(&mut self, offset: u8) -> u8 {
         probes::uart_reg_read!(|| offset);
+
+        probes::uart_reg_thre_intr!(|| {
+            if self.thre_intr {
+                1
+            } else {
+                0
+            }
+        });
+
         match (offset, self.is_dlab()) {
             (REG_RHR, false) => {
                 if let Some(d) = self.rx_fifo.read() {
@@ -342,15 +357,30 @@ pub mod migrate {
 mod bits {
     #![allow(unused)]
 
+    // Offsets from base
+
     pub const REG_RHR: u8 = 0b000; // RO
-    pub const REG_THR: u8 = 0b000; // WO
-    pub const REG_IER: u8 = 0b001; // RW
+    // Transmitter Holding Register (WO)
+    pub const REG_THR: u8 = 0b000;
+
+    // Interrupt Enable Register (RW)
+    pub const REG_IER: u8 = 0b001;
+
     pub const REG_ISR: u8 = 0b010; // RO
     pub const REG_FCR: u8 = 0b010; // WO
-    pub const REG_LCR: u8 = 0b011; // RW
-    pub const REG_MCR: u8 = 0b100; // RW
-    pub const REG_LSR: u8 = 0b101; // RO
-    pub const REG_MSR: u8 = 0b110; // RO
+
+    // Line Control Register (RW)
+    pub const REG_LCR: u8 = 0b011;
+
+    // Modem Control Register (RW)
+    pub const REG_MCR: u8 = 0b100;
+
+    // Line Status Register (RO)
+    pub const REG_LSR: u8 = 0b101;
+
+    // Modem Status Register (RO)
+    pub const REG_MSR: u8 = 0b110;
+
     pub const REG_SPR: u8 = 0b111; // RW
     pub const REG_DLL: u8 = 0b000; // RW when DLAB=1
     pub const REG_DLH: u8 = 0b001; // RW when DLAB=1
