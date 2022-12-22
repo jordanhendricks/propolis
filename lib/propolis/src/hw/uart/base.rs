@@ -1,4 +1,5 @@
 use bits::*;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 #[usdt::provider(provider = "propolis")]
@@ -69,7 +70,6 @@ impl Uart {
 
         probes::uart_rx_fifo!(|| self.rx_fifo.buf.len() as u8);
         probes::uart_tx_fifo!(|| self.tx_fifo.buf.len() as u8);
-
 
         match (offset, self.is_dlab()) {
             (REG_RHR, false) => {
@@ -293,6 +293,8 @@ impl Uart {
             div_low: self.reg_div_low,
             div_high: self.reg_div_high,
             thre_state: self.thre_intr,
+            rx_fifo: self.rx_fifo.clone(),
+            tx_fifo: self.tx_fifo.clone(),
         }
     }
 
@@ -307,10 +309,13 @@ impl Uart {
         self.reg_div_low = state.div_low;
         self.reg_div_high = state.div_high;
         self.thre_intr = state.thre_state;
+        self.rx_fifo = state.rx_fifo.clone();
+        self.tx_fifo = state.tx_fifo.clone();
     }
 }
 
-struct Fifo {
+#[derive(Deserialize, Serialize, Clone)]
+pub struct Fifo {
     len: usize,
     buf: VecDeque<u8>,
 }
@@ -344,6 +349,8 @@ impl Fifo {
 pub mod migrate {
     use serde::{Deserialize, Serialize};
 
+    use super::Fifo;
+
     #[derive(Deserialize, Serialize)]
     pub struct UartV1 {
         pub intr_enable: u8,
@@ -356,6 +363,8 @@ pub mod migrate {
         pub div_low: u8,
         pub div_high: u8,
         pub thre_state: bool,
+        pub rx_fifo: Fifo,
+        pub tx_fifo: Fifo,
     }
 }
 
@@ -365,7 +374,7 @@ mod bits {
     // Offsets from base
 
     pub const REG_RHR: u8 = 0b000; // RO
-    // Transmitter Holding Register (WO)
+                                   // Transmitter Holding Register (WO)
     pub const REG_THR: u8 = 0b000;
 
     // Interrupt Enable Register (RW)

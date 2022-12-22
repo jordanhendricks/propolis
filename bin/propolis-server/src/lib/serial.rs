@@ -21,7 +21,6 @@ use tokio_tungstenite::tungstenite::protocol::{
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{tungstenite, WebSocketStream};
 
-
 #[usdt::provider(provider = "propolis")]
 mod probes {
     fn serial_close_recv() {}
