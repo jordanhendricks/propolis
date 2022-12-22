@@ -1,12 +1,13 @@
-use std::collections::VecDeque;
-
 use bits::*;
+use std::collections::VecDeque;
 
 #[usdt::provider(provider = "propolis")]
 mod probes {
     fn uart_reg_read(offset: u8) {}
     fn uart_reg_write(offset: u8, data: u8) {}
-    fn uart_reg_thre_intr(enabled: u8) {}
+    fn uart_thre_intr(enabled: u8) {}
+    fn uart_rx_fifo(len: u8) {}
+    fn uart_tx_fifo(len: u8) {}
 }
 
 /*
@@ -58,13 +59,17 @@ impl Uart {
     pub fn reg_read(&mut self, offset: u8) -> u8 {
         probes::uart_reg_read!(|| offset);
 
-        probes::uart_reg_thre_intr!(|| {
+        probes::uart_thre_intr!(|| {
             if self.thre_intr {
                 1
             } else {
                 0
             }
         });
+
+        probes::uart_rx_fifo!(|| self.rx_fifo.buf.len() as u8);
+        probes::uart_tx_fifo!(|| self.tx_fifo.buf.len() as u8);
+
 
         match (offset, self.is_dlab()) {
             (REG_RHR, false) => {
