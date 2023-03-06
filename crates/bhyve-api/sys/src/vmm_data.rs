@@ -21,6 +21,7 @@ pub const VDC_ATPIC: u16 = 9;
 pub const VDC_HPET: u16 = 10;
 pub const VDC_PM_TIMER: u16 = 11;
 pub const VDC_RTC: u16 = 12;
+pub const VDC_VMM_TIMING: u16 = 13;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Serialize, Deserialize)]
@@ -189,7 +190,19 @@ impl Default for vdi_rtc_v1 {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Default, Serialize, Deserialize)]
+pub struct vdi_timing_info_v1 {
+    pub vt_guest_freq: u64,
+    pub vt_guest_tsc: u64,
+    pub vt_boot_hrtime: i64,
+    pub vt_hrtime: i64,
+    pub vt_hres_sec: u64,
+    pub vt_hres_ns: u64,
+}
+
 // VDC_VMM_ARCH v1 data identifiers
+// TODO: fix this up when illumos 15143 lands
 
 // VM-wide:
 
