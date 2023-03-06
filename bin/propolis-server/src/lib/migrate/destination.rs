@@ -313,6 +313,26 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
                 }
             }
         }
+        self.send_msg(codec::Message::Okay).await?;
+
+        // Update VMM data
+        let vmm_state: String = match self.read_msg().await? {
+            codec::Message::Serialized(encoded) => encoded,
+            msg => {
+                error!(self.log(), "arch state: unexpected message: {msg:?}");
+                return Err(MigrateError::UnexpectedMessage);
+            }
+        };
+        info!(self.log(), "VMM State: {:?}", vmm_state);
+        {
+            let instance_guard = self.vm_controller.instance().lock();
+            let vmm_hdl = &instance_guard.machine().hdl;
+            let mut deserializer = ron::Deserializer::from_str(&vmm_state)
+                .map_err(codec::ProtocolError::from)?;
+            let deserializer =
+                &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
+            vmm_hdl.import(deserializer)?;
+        }
 
         self.send_msg(codec::Message::Okay).await
     }

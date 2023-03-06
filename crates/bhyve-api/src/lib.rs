@@ -169,6 +169,9 @@ unsafe fn ioctl(
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum ApiVersion {
+    /// Adds support for modifying timing-related data of a guest.
+    V10 = 10,
+
     /// Revamps ioctls for administrating the VMM memory reservoir and adds
     /// kstat for tracking its capacity and utilization.
     V9 = 9,
@@ -189,7 +192,7 @@ pub enum ApiVersion {
 }
 impl ApiVersion {
     pub const fn current() -> Self {
-        Self::V9
+        Self::V10
     }
 }
 
