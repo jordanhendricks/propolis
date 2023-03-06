@@ -64,7 +64,7 @@ pub fn build_instance(
     name: &str,
     spec: &InstanceSpec,
     use_reservoir: bool,
-    _log: slog::Logger,
+    log: slog::Logger,
 ) -> Result<Instance> {
     let (lowmem, highmem) = get_spec_guest_ram_limits(spec);
     let create_opts = propolis::vmm::CreateOpts {
@@ -72,7 +72,7 @@ pub fn build_instance(
         use_reservoir,
         track_dirty: true,
     };
-    let mut builder = Builder::new(name, create_opts)?
+    let mut builder = Builder::new(name, log.clone(), create_opts)?
         .max_cpus(spec.devices.board.cpus)?
         .add_mem_region(0, lowmem, "lowmem")?
         .add_rom_region(0x1_0000_0000 - MAX_ROM_SIZE, MAX_ROM_SIZE, "bootrom")?

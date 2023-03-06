@@ -14,10 +14,11 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use slog::Logger;
+
 use crate::common::PAGE_SIZE;
 use crate::vmm::mem::Prot;
 
-#[derive(Default, Copy, Clone)]
 /// Configurable options for VMM instance creation
 ///
 /// # Options:
@@ -26,6 +27,7 @@ use crate::vmm::mem::Prot;
 /// - `use_reservoir`: Allocate guest memory (only) from the VMM reservoir.  If
 /// this is enabled, and memory in excess of what is available from the
 /// reservoir is requested, creation of that guest memory resource will fail.
+#[derive(Default, Copy, Clone)]
 pub struct CreateOpts {
     pub force: bool,
     pub use_reservoir: bool,
@@ -41,7 +43,11 @@ pub struct CreateOpts {
 /// # Arguments
 /// - `name`: The name of the VM to create.
 /// - `opts`: Creation options (detailed in `CreateOpts`)
-pub(crate) fn create_vm(name: &str, opts: CreateOpts) -> Result<VmmHdl> {
+pub(crate) fn create_vm(
+    name: &str,
+    log: Logger,
+    opts: CreateOpts,
+) -> Result<VmmHdl> {
     let ctl = bhyve_api::VmmCtlFd::open()?;
 
     let mut req = bhyve_api::vm_create_req::new(name);
@@ -77,6 +83,7 @@ pub(crate) fn create_vm(name: &str, opts: CreateOpts) -> Result<VmmHdl> {
         inner,
         destroyed: AtomicBool::new(false),
         name: name.to_string(),
+        log: Some(log),
         #[cfg(test)]
         is_test_hdl: false,
     })
@@ -119,6 +126,7 @@ pub struct VmmHdl {
     pub(super) inner: bhyve_api::VmmFd,
     destroyed: AtomicBool,
     name: String,
+    log: Option<Logger>,
 
     #[cfg(test)]
     /// Track if this VmmHdl belongs to a wholly fictitious Instance/Machine.
@@ -406,6 +414,156 @@ impl VmmHdl {
         destroy_vm_impl(&self.name)
     }
 
+    /*
+    // TODO: Hacky and strictly tied to migration versioning. Want to think of
+    // a better way to structure this.
+    pub fn export_vm(
+        &self,
+    ) -> std::result::Result<BhyveVmV1, MigrateStateError> {
+        Ok(BhyveVmV1::read(self)?)
+    }
+
+    /// Export the global VMM state.
+    pub fn export(
+        &self,
+    ) -> std::result::Result<Box<dyn Serialize>, MigrateStateError> {
+        Ok(Box::new(BhyveVmV1::read(self)?))
+    }
+
+    /// Restore previously exported global VMM state.
+    pub fn import(
+        &self,
+        deserializer: &mut dyn Deserializer,
+    ) -> std::result::Result<(), MigrateStateError> {
+        let mut imported: BhyveVmV1 = erased_serde::deserialize(deserializer)?;
+
+        // Update guest timing-related data to adjust for migration time and
+        // movement across hosts before writing state back to the VMM.
+        self.adjust_timing_data(&mut imported.timing_info)?;
+
+        imported.write(self)?;
+        Ok(())
+    }
+
+    /// Update guest timing-related data to account for how much time has
+    /// elapsed since the VMM timing data was read on the source.
+    ///
+    ///
+    /// We need to update the guest-related fields of
+    /// [`BhyveVmV1::TimingInfoV1`] as such:
+    ///
+    /// - (`guest_tsc`)[TimingInfoV1::guest_tsc], the guest TSC
+    /// value at migration time, which is used by bhyve to calculate the guest's
+    /// TSC offset.
+    /// - (`boot_hrtime`)[TimingInfoV1::boot_hrtime], which represents
+    /// the hrtime on the host for when the VM booted. This is a relative value
+    /// used to normalize device timers on the kernel side, so it will be
+    /// negative if the guest has a longer uptime than the host it's running on.
+    ///
+    /// Note that this adjustment won't capture all the time that has passed
+    /// between reading data on the source and it being updated on the kernel
+    /// side; bhyve makes some additional similar adjustments to both of these
+    /// values to account for the latency from when we import the state to it
+    /// actually arriving in-kernel.
+    ///
+    /// In order to make those adjustments, we need to also update the
+    /// host-related fields of [TimingInfoV1]:
+    ///
+    /// - (`hrtime`)[TimingInfoV1::hrtime]: the host hrtime (monotonic clock)
+    /// when these adjustments were made
+    /// - (`hrestime`)[TimingInfoV1::hrestime]: the host hrestime (wall clock)
+    /// when these adjustments were made
+    ///
+    /// See the [`time_adjust`] module for more details about how the adjustment
+    /// calculations here are performed.
+    fn adjust_timing_data(
+        &self,
+        timing_data: &mut TimingInfoV1,
+    ) -> std::result::Result<(), MigrateStateError> {
+        let log = self.log.as_ref().unwrap();
+
+        info!(log, "Adjusting timing data for guest: {:#?}", timing_data);
+        probes::adj_time_begin!(|| (
+            timing_data.guest_freq,
+            timing_data.guest_tsc,
+            timing_data.boot_hrtime,
+        ));
+
+        // Take a snapshot of time on this host.
+        let dst_time = time_adjust::host_time_snapshot()?;
+
+        // Get the VM uptime.
+        let vm_uptime = time_adjust::calc_guest_uptime(
+            timing_data.hrtime,
+            timing_data.boot_hrtime,
+        )?;
+
+        // Compute the delta for how long migration took, using wall clock time.
+        let migrate_delta = time_adjust::calc_migrate_delta(
+            timing_data.hrestime,
+            dst_time.wall_clock,
+        )?;
+
+        // Find the total time delta we need to adjust for `boot_hrtime`.
+        let boot_hrtime_delta =
+            time_adjust::calc_boot_hrtime_delta(vm_uptime, migrate_delta)?;
+
+        // Get the new boot_hrtime.
+        let adj_boot_hrtime = time_adjust::calc_boot_hrtime(
+            boot_hrtime_delta,
+            timing_data.boot_hrtime,
+            dst_time.hrtime,
+        )?;
+
+        // Get the guest TSC adjustment.
+        let tsc_delta =
+            time_adjust::calc_tsc_delta(migrate_delta, timing_data.guest_freq)?;
+        let adj_guest_tsc =
+            time_adjust::calc_guest_tsc(timing_data.guest_tsc, tsc_delta)?;
+
+        info!(
+            log,
+            "Timing data adjustments completed.\n\
+            - guest TSC freq: {} Hz = {} GHz\n\
+            - guest uptime: {:?}\n\
+            - migration time delta: {:?}\n\
+            - guest_tsc adjustment = {} + {} ---> {}\n\
+            - boot_hrtime adjustment = {} ---> {} - {} = {}\n\
+            - dest highres clock time: {}\n\
+            - dest wall clock time: {:?}",
+            timing_data.guest_freq,
+            timing_data.guest_freq as f64 / 1_000_000_000f64,
+            vm_uptime,
+            migrate_delta,
+            timing_data.guest_tsc,
+            tsc_delta,
+            adj_guest_tsc,
+            timing_data.boot_hrtime,
+            timing_data.hrtime,
+            boot_hrtime_delta.as_nanos(),
+            adj_boot_hrtime,
+            dst_time.hrtime.as_nanos(),
+            dst_time.wall_clock,
+        );
+
+        // Update the timing data with the adjustments and current host times.
+        timing_data.guest_tsc = adj_guest_tsc;
+        timing_data.boot_hrtime = adj_boot_hrtime;
+        timing_data.hrtime = dst_time.hrtime.as_nanos() as u64;
+        timing_data.hrestime = dst_time.wall_clock;
+
+        probes::adj_time_end!(|| (
+            timing_data.guest_freq,
+            timing_data.guest_tsc,
+            timing_data.boot_hrtime,
+            vm_uptime.as_nanos() as u64,
+            migrate_delta.as_nanos() as u64,
+        ));
+
+        Ok(())
+    }
+*/
+
     /// Set whether instance should auto-destruct when closed
     pub fn set_autodestruct(&self, enable_autodestruct: bool) -> Result<()> {
         self.ioctl_usize(
@@ -418,7 +576,7 @@ impl VmmHdl {
 #[cfg(test)]
 impl VmmHdl {
     /// Build a VmmHdl instance suitable for unit tests, but nothing else, since
-    /// it will not be backed by any real vmm reousrces.
+    /// it will not be backed by any real vmm resources.
     pub(crate) fn new_test(mem_size: usize) -> Result<Self> {
         use tempfile::tempfile;
         let fp = tempfile()?;
@@ -428,6 +586,7 @@ impl VmmHdl {
             inner,
             destroyed: AtomicBool::new(false),
             name: "TEST-ONLY VMM INSTANCE".to_string(),
+            log: None,
             is_test_hdl: true,
         })
     }
@@ -438,4 +597,17 @@ pub fn query_reservoir() -> Result<bhyve_api::vmm_resv_query> {
     let mut data = bhyve_api::vmm_resv_query::default();
     let _ = unsafe { ctl.ioctl(bhyve_api::VMM_RESV_QUERY, &mut data) }?;
     Ok(data)
+}
+
+#[usdt::provider(provider = "propolis")]
+mod probes {
+    fn adj_time_begin(guest_freq: u64, guest_tsc: u64, boot_hrtime: i64) {}
+    fn adj_time_end(
+        guest_freq: u64,
+        guest_tsc: u64,
+        boot_hrtime: i64,
+        vm_uptime: u64,
+        migrate_delta: u64,
+    ) {
+    }
 }
