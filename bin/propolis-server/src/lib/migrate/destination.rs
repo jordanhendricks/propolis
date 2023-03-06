@@ -148,6 +148,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
     }
 
     async fn ram_push(&mut self) -> Result<(), MigrateError> {
+        info!(self.log(), "ram_push: begin");
         self.update_state(MigrationState::RamPush).await;
         let (dirty, highest) = self.query_ram().await?;
         for (k, region) in dirty.as_raw_slice().chunks(4096).enumerate() {
@@ -179,6 +180,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
                 _ => return Err(MigrateError::UnexpectedMessage),
             };
         }
+        info!(self.log(), "ram_push: end");
         self.send_msg(codec::Message::MemDone).await?;
         self.update_state(MigrationState::Pause).await;
         Ok(())
@@ -312,6 +314,31 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
                     }
                 }
             }
+        }
+        self.send_msg(codec::Message::Okay).await?;
+
+        // Update timing-related data
+        let arch_state: String = match self.read_msg().await? {
+            codec::Message::Serialized(encoded) => encoded,
+            msg => {
+                error!(self.log(), "arch state: unexpected message: {msg:?}");
+                return Err(MigrateError::UnexpectedMessage);
+            }
+        };
+        info!(self.log(), "Arch State: {:?}", arch_state);
+        // TODO: print out adjusted values -- guest TSC and boot_hrtime
+
+        {
+            let instance_guard = self.vm_controller.instance().lock();
+            let hdl = &instance_guard.machine().hdl;
+            info!(self.log(), "creating deserializer from arch state");
+            let mut deserializer = ron::Deserializer::from_str(&arch_state)
+                .map_err(codec::ProtocolError::from)?;
+            let deserializer =
+                &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
+            info!(self.log(), "importing arch_state");
+            hdl.import(deserializer)?;
+            info!(self.log(), "done importing arch_state");
         }
 
         self.send_msg(codec::Message::Okay).await

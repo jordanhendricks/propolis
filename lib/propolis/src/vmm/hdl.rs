@@ -459,7 +459,7 @@ pub fn query_reservoir() -> Result<bhyve_api::vmm_resv_query> {
 pub mod migrate {
     use std::io;
 
-    use bhyve_api::vdi_field_entry_v1;
+    use bhyve_api::{vdi_field_entry_v1, vdi_timing_info_v1};
     use serde::{Deserialize, Serialize};
 
     use crate::vmm;
@@ -469,12 +469,22 @@ pub mod migrate {
     #[derive(Clone, Debug, Default, Deserialize, Serialize)]
     pub struct BhyveVmV1 {
         pub arch_entries: Vec<ArchEntryV1>,
+        pub timing_info: TimingInfoV1,
     }
 
     #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
     pub struct ArchEntryV1 {
         pub ident: u32,
         pub value: u64,
+    }
+
+    #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
+    pub struct TimingInfoV1 {
+        pub guest_freq: u64,
+        pub guest_tsc: u64,
+        pub hrtime: u64,
+        pub hrestime: u64,
+        pub boot_hrtime: u64,
     }
 
     impl From<vdi_field_entry_v1> for ArchEntryV1 {
@@ -492,20 +502,50 @@ pub mod migrate {
         }
     }
 
+    impl From<vdi_timing_info_v1> for TimingInfoV1 {
+        fn from(raw: vdi_timing_info_v1) -> Self {
+            Self {
+                guest_freq: raw.vt_guest_freq,
+                guest_tsc: raw.vt_guest_tsc,
+                hrtime: raw.vt_hrtime,
+                hrestime: raw.vt_hrestime,
+                boot_hrtime: raw.vt_boot_hrtime,
+            }
+        }
+    }
+    impl From<TimingInfoV1> for vdi_timing_info_v1 {
+        fn from(info: TimingInfoV1) -> Self {
+            vdi_timing_info_v1 {
+                vt_guest_freq: info.guest_freq,
+                vt_guest_tsc: info.guest_tsc,
+                vt_hrtime: info.hrtime,
+                vt_hrestime: info.hrestime,
+                vt_boot_hrtime: info.boot_hrtime,
+            }
+        }
+    }
+
     impl BhyveVmV1 {
         pub(super) fn read(hdl: &VmmHdl) -> io::Result<Self> {
+            // TODO: fix this up when illumos 15143 lands
             let arch_entries: Vec<bhyve_api::vdi_field_entry_v1> =
                 vmm::data::read_many(hdl, -1, bhyve_api::VDC_VMM_ARCH, 1)?;
+
+            let timing_info: bhyve_api::vdi_timing_info_v1 =
+                vmm::data::read(hdl, -1, bhyve_api::VDC_VMM_TIMING, 1)?;
+
             Ok(Self {
                 arch_entries: arch_entries
                     .into_iter()
                     .map(From::from)
                     .collect(),
+                timing_info: TimingInfoV1::from(timing_info),
             })
         }
 
         pub(super) fn write(self, hdl: &VmmHdl) -> io::Result<()> {
-            let mut arch_entries: Vec<bhyve_api::vdi_field_entry_v1> = self
+            // TODO: fix this up when illumos 15143 lands
+            /*let mut arch_entries: Vec<bhyve_api::vdi_field_entry_v1> = self
                 .arch_entries
                 .into_iter()
                 // TODO: Guest TSC frequency is not currently adjustable
@@ -515,10 +555,19 @@ pub mod migrate {
             vmm::data::write_many(
                 hdl,
                 -1,
-                bhyve_api::VDC_VMM_ARCH,
+                bhyve_api::VDC_VMM_TIMING,
                 1,
                 &mut arch_entries,
+            )?; */
+            let timing_info = vdi_timing_info_v1::from(self.timing_info);
+            vmm::data::write(
+                hdl,
+                -1,
+                bhyve_api::VDC_VMM_TIMING,
+                1,
+                timing_info,
             )?;
+
             Ok(())
         }
     }

@@ -135,6 +135,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
     }
 
     async fn ram_push(&mut self) -> Result<(), MigrateError> {
+        info!(self.log(), "ram_push: begin");
         self.update_state(MigrationState::RamPush).await;
         let vmm_ram_range = self.vmm_ram_bounds().await?;
         let req_ram_range = self.read_mem_query().await?;
@@ -286,6 +287,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         .await?;
 
         self.send_msg(codec::Message::Okay).await?;
+        self.read_ok().await?;
+
+        // Migrate timing-related data
+        let arch_state;
+
+        {
+            let instance_guard = self.vm_controller.instance().lock();
+            let hdl = &instance_guard.machine().hdl;
+            let raw = hdl.export()?;
+            arch_state = ron::ser::to_string(&raw)
+                .map_err(codec::ProtocolError::from)?;
+        }
+
+        info!(self.log(), "Arch State: {:#x?}", arch_state);
+        self.send_msg(codec::Message::Serialized(arch_state)).await?;
         self.read_ok().await
     }
 
