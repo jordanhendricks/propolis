@@ -46,9 +46,10 @@ pub struct vdi_field_entry_v1 {
 pub struct vdi_timing_info_v1 {
     pub vt_guest_freq: u64,
     pub vt_guest_tsc: u64,
-    pub vt_hrtime: u64,
-    pub vt_hrestime: u64,
-    pub vt_boot_hrtime: u64,
+    pub vt_boot_hrtime: i64,
+    pub vt_hrtime: i64,
+    pub vt_hres_sec: u64,
+    pub vt_hres_ns: u64,
 }
 
 #[repr(C)]

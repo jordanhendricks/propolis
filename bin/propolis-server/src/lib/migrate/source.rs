@@ -289,19 +289,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         self.send_msg(codec::Message::Okay).await?;
         self.read_ok().await?;
 
-        // Migrate timing-related data
-        let arch_state;
-
+        // Migrate VMM-wide data
+        let vmm_state;
         {
             let instance_guard = self.vm_controller.instance().lock();
             let hdl = &instance_guard.machine().hdl;
             let raw = hdl.export()?;
-            arch_state = ron::ser::to_string(&raw)
+            vmm_state = ron::ser::to_string(&raw)
                 .map_err(codec::ProtocolError::from)?;
         }
-
-        info!(self.log(), "Arch State: {:#x?}", arch_state);
-        self.send_msg(codec::Message::Serialized(arch_state)).await?;
+        info!(self.log(), "VMM State: {#?}", vmm_state);
+        self.send_msg(codec::Message::Serialized(vmm_state)).await?;
         self.read_ok().await
     }
 

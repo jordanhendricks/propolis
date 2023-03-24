@@ -317,28 +317,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
         }
         self.send_msg(codec::Message::Okay).await?;
 
-        // Update timing-related data
-        let arch_state: String = match self.read_msg().await? {
+        // Update VMM data
+        let vmm_state: String = match self.read_msg().await? {
             codec::Message::Serialized(encoded) => encoded,
             msg => {
                 error!(self.log(), "arch state: unexpected message: {msg:?}");
                 return Err(MigrateError::UnexpectedMessage);
             }
         };
-        info!(self.log(), "Arch State: {:?}", arch_state);
+        info!(self.log(), "VMM State: {:?}", vmm_state);
         // TODO: print out adjusted values -- guest TSC and boot_hrtime
-
         {
             let instance_guard = self.vm_controller.instance().lock();
-            let hdl = &instance_guard.machine().hdl;
-            info!(self.log(), "creating deserializer from arch state");
-            let mut deserializer = ron::Deserializer::from_str(&arch_state)
+            let vmm_hdl = &instance_guard.machine().hdl;
+            let mut deserializer = ron::Deserializer::from_str(&vmm_state)
                 .map_err(codec::ProtocolError::from)?;
             let deserializer =
                 &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
-            info!(self.log(), "importing arch_state");
             hdl.import(deserializer)?;
-            info!(self.log(), "done importing arch_state");
         }
 
         self.send_msg(codec::Message::Okay).await

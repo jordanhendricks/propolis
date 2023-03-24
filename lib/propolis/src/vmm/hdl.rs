@@ -8,16 +8,21 @@
 //! object which represents a single VM.
 
 use erased_serde::{Deserializer, Serialize};
+use slog::{info, Logger};
 
 use std::fs::File;
 use std::io::{Error, ErrorKind, Result, Write};
 use std::os::raw::c_void;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::common::PAGE_SIZE;
 use crate::migrate::MigrateStateError;
+use crate::time::{get_highres_time, get_wallclock_time};
 use crate::vmm::mem::Prot;
+
+use self::migrate::{BhyveVmV1, TimingInfoV1};
 
 #[derive(Default, Copy, Clone)]
 /// Configurable options for VMM instance creation
@@ -43,7 +48,11 @@ pub struct CreateOpts {
 /// # Arguments
 /// - `name`: The name of the VM to create.
 /// - `opts`: Creation options (detailed in `CreateOpts`)
-pub(crate) fn create_vm(name: &str, opts: CreateOpts) -> Result<VmmHdl> {
+pub(crate) fn create_vm(
+    name: &str,
+    log: Logger,
+    opts: CreateOpts,
+) -> Result<VmmHdl> {
     let ctl = bhyve_api::VmmCtlFd::open()?;
 
     let mut req = bhyve_api::vm_create_req::new(name);
@@ -79,6 +88,7 @@ pub(crate) fn create_vm(name: &str, opts: CreateOpts) -> Result<VmmHdl> {
         inner,
         destroyed: AtomicBool::new(false),
         name: name.to_string(),
+        log,
         #[cfg(test)]
         is_test_hdl: false,
     })
@@ -121,6 +131,7 @@ pub struct VmmHdl {
     pub(super) inner: bhyve_api::VmmFd,
     destroyed: AtomicBool,
     name: String,
+    log: Logger,
 
     #[cfg(test)]
     /// Track if this VmmHdl belongs to a wholly fictitious Instance/Machine.
@@ -408,7 +419,7 @@ impl VmmHdl {
     pub fn export(
         &self,
     ) -> std::result::Result<Box<dyn Serialize>, MigrateStateError> {
-        Ok(Box::new(migrate::BhyveVmV1::read(self)?))
+        Ok(Box::new(BhyveVmV1::read(self)?))
     }
 
     /// Restore previously exported global VMM state.
@@ -416,10 +427,147 @@ impl VmmHdl {
         &self,
         deserializer: &mut dyn Deserializer,
     ) -> std::result::Result<(), MigrateStateError> {
-        let deserialized: migrate::BhyveVmV1 =
+        let mut deserialized: BhyveVmV1 =
             erased_serde::deserialize(deserializer)?;
+
+        self.adjust_timing_data(&mut deserialized.timing_info)?;
+
         deserialized.write(self)?;
         Ok(())
+    }
+
+    // Take a snapshot of the hrtime and the wall clock time of this host.
+    fn host_time_snapshot(
+    ) -> std::result::Result<(u64, Duration), MigrateStateError> {
+        let hrtime;
+        let real_time;
+
+        match get_highres_time() {
+            Ok(hrt) => {
+                hrtime = hrt;
+            }
+            Err(e) => {
+                return Err(MigrateStateError::ImportFailed(format!(
+                    "could not get high res time: {:?}",
+                    e
+                )))
+            }
+        }
+        match get_wallclock_time() {
+            Ok(rt) => {
+                real_time = rt;
+            }
+            Err(e) => {
+                return Err(MigrateStateError::ImportFailed(format!(
+                    "could not get wall clock time: {:?}",
+                    e
+                )))
+            }
+        }
+
+        Ok((hrtime, real_time))
+    }
+
+    // TODO
+    fn compute_migration_delta(
+        src_wallclock: Duration,
+        dest_wallclock: Duration,
+    ) -> std::result::Result<Duration, MigrateStateError> {
+        match Duration::checked_sub(dest_wallclock, src_wallclock) {
+            Some(d) => {
+                Ok(d)
+            },
+            None => {
+                Err(MigrateStateError::ImportFailed(format!(
+                    "perceived wall clock delta found negative: source read time: {:?}, target write time: {:?}",
+                    src_wallclock,
+                    dest_wallclock,
+                )))
+            }
+        }
+    }
+
+    // TODO: comment about negative
+    // TODO: handle overflow?
+    fn compute_vm_uptime(src_hrtime: u64, boot_hrtime: i64) -> u64 {
+        src_hrtime - boot_hrtime as u64
+    }
+
+    // Use VM uptime and migration time delta to find the new boot_hrtime.
+    fn compute_boot_hrtime(
+        vm_uptime_ns: u64,
+        wallclock_delta: Duration,
+        boot_hrtime: i64,
+    ) -> std::result::Result<i64, MigrateStateError> {
+        let boot_hrt_adjust;
+        match Duration::checked_add(
+            wallclock_delta,
+            Duration::from_nanos(vm_uptime_ns),
+        ) {
+            Some(v) => {
+                boot_hrt_adjust = v.as_nanos();
+            }
+            None => {
+                return Err(MigrateStateError::ImportFailed(format!(
+                    "boot_hrtime adjustment could not be represented: VM uptime = {} ns, migration delta = {:?}, boot_hrtime = {}",
+                    vm_uptime_ns,
+                    wallclock_delta,
+                    boot_hrtime,
+                )));
+            }
+        }
+
+        // TODO: handle cast
+        let bhrt_res = boot_hrtime.checked_sub(boot_hrt_adjust as i64);
+        match bhrt_res {
+            Some(v) => {
+                Ok(v)
+            },
+            None => {
+                Err(MigrateStateError::ImportFailed(format!(
+                    "boot_hrtime adjustment could not be applied (underflow): VM uptime = {} ns, migration delta = {:?}, boot_hrtime = {}",
+                    vm_uptime_ns,
+                    wallclock_delta,
+                    boot_hrtime,
+                )))
+            }
+        }
+    }
+
+    fn adjust_timing_data(
+        &self,
+        timing_data: &mut TimingInfoV1,
+    ) -> std::result::Result<(), MigrateStateError> {
+        // Take a snapshot of time on this host.
+        let (host_hrt, host_hrest) = Self::host_time_snapshot()?;
+
+        // Get the VM uptime.
+        let vm_uptime_ns = Self::compute_vm_uptime(
+            timing_data.hrtime,
+            timing_data.boot_hrtime,
+        );
+        // Compute the delta for how long the migration took, using wall clock time.
+        let migration_delta =
+            Self::compute_migration_delta(timing_data.hrestime, host_hrest)?;
+
+        // Adjust the boot_hrtime.
+        timing_data.boot_hrtime = Self::compute_boot_hrtime(
+            vm_uptime_ns,
+            migration_delta,
+            timing_data.boot_hrtime,
+        )?;
+
+        // Adjust the guest TSC.
+        // TODO
+
+        info!(
+            self.log,
+            "Adjusting guest timing data: vm_uptime={:?}, delta={:?}",
+            vm_uptime_ns,
+            migration_delta
+        );
+
+        todo!()
     }
 
     /// Set whether instance should auto-destruct when closed
@@ -457,7 +605,7 @@ pub fn query_reservoir() -> Result<bhyve_api::vmm_resv_query> {
 }
 
 pub mod migrate {
-    use std::io;
+    use std::{io, time::Duration};
 
     use bhyve_api::{vdi_field_entry_v1, vdi_timing_info_v1};
     use serde::{Deserialize, Serialize};
@@ -480,11 +628,20 @@ pub mod migrate {
 
     #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
     pub struct TimingInfoV1 {
+        // guest TSC frequency
         pub guest_freq: u64,
+
+        // guest TSC
         pub guest_tsc: u64,
+
+        // monotonic host clock (ns)
         pub hrtime: u64,
-        pub hrestime: u64,
-        pub boot_hrtime: u64,
+
+        // wall clock host clock
+        pub hrestime: Duration,
+
+        // guest boot_hrtime (can be negative)
+        pub boot_hrtime: i64,
     }
 
     impl From<vdi_field_entry_v1> for ArchEntryV1 {
@@ -507,8 +664,9 @@ pub mod migrate {
             Self {
                 guest_freq: raw.vt_guest_freq,
                 guest_tsc: raw.vt_guest_tsc,
-                hrtime: raw.vt_hrtime,
-                hrestime: raw.vt_hrestime,
+                hrtime: raw.vt_hrtime as u64,
+                // TODO: u64 to u32 cast
+                hrestime: Duration::new(raw.vt_hres_sec, raw.vt_hres_ns as u32),
                 boot_hrtime: raw.vt_boot_hrtime,
             }
         }
@@ -518,8 +676,9 @@ pub mod migrate {
             vdi_timing_info_v1 {
                 vt_guest_freq: info.guest_freq,
                 vt_guest_tsc: info.guest_tsc,
-                vt_hrtime: info.hrtime,
-                vt_hrestime: info.hrestime,
+                vt_hrtime: info.hrtime as i64,
+                vt_hres_sec: info.hrestime.as_secs(),
+                vt_hres_ns: info.hrestime.subsec_nanos() as u64,
                 vt_boot_hrtime: info.boot_hrtime,
             }
         }
