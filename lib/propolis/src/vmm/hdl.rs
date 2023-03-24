@@ -430,6 +430,8 @@ impl VmmHdl {
         let mut deserialized: BhyveVmV1 =
             erased_serde::deserialize(deserializer)?;
 
+        // Update guest timing-related data to adjust for migration time and
+        // movement across hosts before sending it to the VMM.
         self.adjust_timing_data(&mut deserialized.timing_info)?;
 
         deserialized.write(self)?;
@@ -493,12 +495,43 @@ impl VmmHdl {
         src_hrtime - boot_hrtime as u64
     }
 
-    // Use VM uptime and migration time delta to find the new boot_hrtime.
+    // Compute new VM boot_hrtime
+    //
+    // The boot_hrtime is the hrtime of when a VM booted on the current host. In
+    // the case of live migrations, this VM did not boot on this host, so we
+    // need to adjust to the boot_hrtime to be the "effective boot_hrtime" --
+    // that is, what the hrtime of this host would've been when this VM booted.
+    //
+    // To do so, we need several pieces of information:
+    // - the current hrtime of this host
+    // - the uptime of the VM
+    // - the migration time delta
+    //
+    // And we can fix up the boot_hrtime as follows:
+    //  boot_hrtime = cur_hrtime - (vm_uptime_ns + wallclock_delta)
+    // 
+    // A couple additional things to note:
+    // - It is possible for the boot_hrtime to be negative, in the case that the
+    // target host has a smaller uptime than the guest. This is okay: hrtime_t
+    // is signed, and the boot_hrtime is used by bhyve as a normalization value
+    // for device timers.
+    // - This calculation still won't quite capture the entire time difference
+    // -- we are only fixing up this value for this specific point in time. The
+    // kernel side of the timing data write will make additional adjustments to
+    // account for the small delta between our timing adjustments and the actual
+    // time of write.
+    //
     fn compute_boot_hrtime(
         vm_uptime_ns: u64,
         wallclock_delta: Duration,
         boot_hrtime: i64,
+        cur_hrtime: i64,
     ) -> std::result::Result<i64, MigrateStateError> {
+
+        // Find total time difference:
+        //      migration delta + VM uptime
+        //
+        // And convert it to ns
         let boot_hrt_adjust;
         match Duration::checked_add(
             wallclock_delta,
@@ -518,7 +551,9 @@ impl VmmHdl {
         }
 
         // TODO: handle cast
-        let bhrt_res = boot_hrtime.checked_sub(boot_hrt_adjust as i64);
+        // Find the new boot_hrtime:
+        //      cur_hrtime - adjustment
+        let bhrt_res = cur_hrtime.checked_sub(boot_hrt_adjust as i64);
         match bhrt_res {
             Some(v) => {
                 Ok(v)
@@ -539,7 +574,7 @@ impl VmmHdl {
         timing_data: &mut TimingInfoV1,
     ) -> std::result::Result<(), MigrateStateError> {
         // Take a snapshot of time on this host.
-        let (host_hrt, host_hrest) = Self::host_time_snapshot()?;
+        let (_host_hrt, host_hrest) = Self::host_time_snapshot()?;
 
         // Get the VM uptime.
         let vm_uptime_ns = Self::compute_vm_uptime(
@@ -550,15 +585,25 @@ impl VmmHdl {
         let migration_delta =
             Self::compute_migration_delta(timing_data.hrestime, host_hrest)?;
 
+        /*
         // Adjust the boot_hrtime.
         timing_data.boot_hrtime = Self::compute_boot_hrtime(
             vm_uptime_ns,
             migration_delta,
             timing_data.boot_hrtime,
+            host_hrt as i64,
         )?;
+        */
 
         // Adjust the guest TSC.
         // TODO
+        // options:
+        // - add host tsc to snapshot (need rdtsc in rust, but that's gonna include the per-CPU
+        // offset, which i think is okay since it's adjusting it to be consistent with other CPUs),; will also need the multiplier or the host_freq; no way to do this currently without another read or an additional call to the kernel
+        // - could pass in a delta as a part of writing the VMM timing info, then the
+        // implementation details of boot_hrtime don't have to live there.
+        // if that's the case, then we don't need to do any TSC math here
+        // the kernel will still have to do the delta calculations
 
         info!(
             self.log,
