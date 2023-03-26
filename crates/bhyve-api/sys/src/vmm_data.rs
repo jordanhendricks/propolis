@@ -23,6 +23,7 @@ pub const VDC_PM_TIMER: u16 = 11;
 pub const VDC_RTC: u16 = 12;
 
 pub const VDC_VMM_TIMING: u16 = 13;
+pub const VDC_VMM_SCALING: u16 = 14;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Serialize, Deserialize)]
@@ -44,12 +45,20 @@ pub struct vdi_field_entry_v1 {
 #[repr(C)]
 #[derive(Copy, Clone, Default, Serialize, Deserialize)]
 pub struct vdi_timing_info_v1 {
-    pub vt_guest_freq: u64,
     pub vt_guest_tsc: u64,
     pub vt_boot_hrtime: i64,
     pub vt_hrtime: i64,
     pub vt_hres_sec: u64,
     pub vt_hres_ns: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default, Serialize, Deserialize)]
+pub struct vdi_tsc_freq_v1 {
+    pub vt_guest_freq: u64,
+    pub vt_host_freq: u64,
+    pub vt_int_size: u32,
+    pub vt_frac_size: u32,
 }
 
 #[repr(C)]

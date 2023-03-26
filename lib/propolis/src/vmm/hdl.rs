@@ -19,10 +19,10 @@ use std::time::Duration;
 
 use crate::common::PAGE_SIZE;
 use crate::migrate::MigrateStateError;
-use crate::time::{get_highres_time, get_wallclock_time};
+use time::{get_highres_time, get_wallclock_time};
 use crate::vmm::mem::Prot;
 
-use self::migrate::{BhyveVmV1, TimingInfoV1};
+use self::migrate::{BhyveVmV1, TimingInfoV1, TscFreqInfoV1};
 
 #[derive(Default, Copy, Clone)]
 /// Configurable options for VMM instance creation
@@ -427,14 +427,18 @@ impl VmmHdl {
         &self,
         deserializer: &mut dyn Deserializer,
     ) -> std::result::Result<(), MigrateStateError> {
-        let mut deserialized: BhyveVmV1 =
+        let mut imported: BhyveVmV1 =
             erased_serde::deserialize(deserializer)?;
+
+        // Get the host TSC frequency
+        let tsc_freq_info = BhyveVmV1::read_tsc_freq_info(self)?;
+        imported.tsc_freq_info = tsc_freq_info;
 
         // Update guest timing-related data to adjust for migration time and
         // movement across hosts before sending it to the VMM.
-        self.adjust_timing_data(&mut deserialized.timing_info)?;
+        self.adjust_timing_data(&mut imported.timing_info, &imported.tsc_freq_info)?;
 
-        deserialized.write(self)?;
+        imported.write(self)?;
         Ok(())
     }
 
@@ -474,10 +478,14 @@ impl VmmHdl {
     fn compute_migration_delta(
         src_wallclock: Duration,
         dest_wallclock: Duration,
-    ) -> std::result::Result<Duration, MigrateStateError> {
+    ) -> std::result::Result<u64, MigrateStateError> {
         match Duration::checked_sub(dest_wallclock, src_wallclock) {
             Some(d) => {
-                Ok(d)
+                let ns = d.as_nanos();
+                // TODO: limit on the delta we support
+                // TryFrom<128> to u64 is unstable
+
+                Ok(ns as u64)
             },
             None => {
                 Err(MigrateStateError::ImportFailed(format!(
@@ -523,7 +531,7 @@ impl VmmHdl {
     //
     fn compute_boot_hrtime(
         vm_uptime_ns: u64,
-        wallclock_delta: Duration,
+        wallclock_delta_ns: u64,
         boot_hrtime: i64,
         cur_hrtime: i64,
     ) -> std::result::Result<i64, MigrateStateError> {
@@ -533,18 +541,15 @@ impl VmmHdl {
         //
         // And convert it to ns
         let boot_hrt_adjust;
-        match Duration::checked_add(
-            wallclock_delta,
-            Duration::from_nanos(vm_uptime_ns),
-        ) {
+        match vm_uptime_ns.checked_add(wallclock_delta_ns) {
             Some(v) => {
-                boot_hrt_adjust = v.as_nanos();
+                boot_hrt_adjust = v;
             }
             None => {
                 return Err(MigrateStateError::ImportFailed(format!(
-                    "boot_hrtime adjustment could not be represented: VM uptime = {} ns, migration delta = {:?}, boot_hrtime = {}",
+                    "boot_hrtime adjustment could not be represented: VM uptime = {} ns, migration delta = {}, boot_hrtime = {}",
                     vm_uptime_ns,
-                    wallclock_delta,
+                    wallclock_delta_ns,
                     boot_hrtime,
                 )));
             }
@@ -562,7 +567,7 @@ impl VmmHdl {
                 Err(MigrateStateError::ImportFailed(format!(
                     "boot_hrtime adjustment could not be applied (underflow): VM uptime = {} ns, migration delta = {:?}, boot_hrtime = {}",
                     vm_uptime_ns,
-                    wallclock_delta,
+                    wallclock_delta_ns,
                     boot_hrtime,
                 )))
             }
@@ -572,38 +577,38 @@ impl VmmHdl {
     fn adjust_timing_data(
         &self,
         timing_data: &mut TimingInfoV1,
+        tsc_freq_data: &TscFreqInfoV1,
     ) -> std::result::Result<(), MigrateStateError> {
         // Take a snapshot of time on this host.
-        let (_host_hrt, host_hrest) = Self::host_time_snapshot()?;
+        let (host_hrt, host_hrest) = Self::host_time_snapshot()?;
 
         // Get the VM uptime.
         let vm_uptime_ns = Self::compute_vm_uptime(
             timing_data.hrtime,
             timing_data.boot_hrtime,
         );
+
         // Compute the delta for how long the migration took, using wall clock time.
-        let migration_delta =
+        let migrate_delta_ns =
             Self::compute_migration_delta(timing_data.hrestime, host_hrest)?;
 
-        /*
+        info!(self.log, "Importing VM with uptime {} ns, migration time = {} ns", vm_uptime_ns, migrate_delta_ns);
+
         // Adjust the boot_hrtime.
         timing_data.boot_hrtime = Self::compute_boot_hrtime(
             vm_uptime_ns,
-            migration_delta,
+            migrate_delta_ns,
             timing_data.boot_hrtime,
             host_hrt as i64,
         )?;
-        */
 
+        // Next steps:
+        // - finish this up
+        // - add scaling needed function for freqratio?
         // Adjust the guest TSC.
-        // TODO
-        // options:
-        // - add host tsc to snapshot (need rdtsc in rust, but that's gonna include the per-CPU
-        // offset, which i think is okay since it's adjusting it to be consistent with other CPUs),; will also need the multiplier or the host_freq; no way to do this currently without another read or an additional call to the kernel
-        // - could pass in a delta as a part of writing the VMM timing info, then the
-        // implementation details of boot_hrtime don't have to live there.
-        // if that's the case, then we don't need to do any TSC math here
-        // the kernel will still have to do the delta calculations
+        let ratio = time::calc_tsc_freqratio(tsc_freq_data.guest_freq, tsc_freq_data.host_freq, tsc_freq_data.int_size, tsc_freq_data.frac_size)?;
+
+        let guest_ticks = time::highres_to_tsc(migrate_delta_ns, tsc_freq_data.guest_freq)?;
 
         info!(
             self.log,
@@ -652,7 +657,7 @@ pub fn query_reservoir() -> Result<bhyve_api::vmm_resv_query> {
 pub mod migrate {
     use std::{io, time::Duration};
 
-    use bhyve_api::{vdi_field_entry_v1, vdi_timing_info_v1};
+    use bhyve_api::{vdi_field_entry_v1, vdi_timing_info_v1, vdi_tsc_freq_v1};
     use serde::{Deserialize, Serialize};
 
     use crate::vmm;
@@ -663,6 +668,7 @@ pub mod migrate {
     pub struct BhyveVmV1 {
         pub arch_entries: Vec<ArchEntryV1>,
         pub timing_info: TimingInfoV1,
+        pub tsc_freq_info: TscFreqInfoV1,
     }
 
     #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
@@ -673,9 +679,6 @@ pub mod migrate {
 
     #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
     pub struct TimingInfoV1 {
-        // guest TSC frequency
-        pub guest_freq: u64,
-
         // guest TSC
         pub guest_tsc: u64,
 
@@ -687,6 +690,19 @@ pub mod migrate {
 
         // guest boot_hrtime (can be negative)
         pub boot_hrtime: i64,
+    }
+
+    #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
+    pub struct TscFreqInfoV1 {
+        // guest TSC frequency (hz)
+        pub guest_freq: u64,
+
+        // host TSC frequency (hz)
+        pub host_freq: u64,
+
+        // Multiplier format
+        pub int_size: u8,
+        pub frac_size: u8,
     }
 
     impl From<vdi_field_entry_v1> for ArchEntryV1 {
@@ -707,7 +723,6 @@ pub mod migrate {
     impl From<vdi_timing_info_v1> for TimingInfoV1 {
         fn from(raw: vdi_timing_info_v1) -> Self {
             Self {
-                guest_freq: raw.vt_guest_freq,
                 guest_tsc: raw.vt_guest_tsc,
                 hrtime: raw.vt_hrtime as u64,
                 // TODO: u64 to u32 cast
@@ -719,12 +734,32 @@ pub mod migrate {
     impl From<TimingInfoV1> for vdi_timing_info_v1 {
         fn from(info: TimingInfoV1) -> Self {
             vdi_timing_info_v1 {
-                vt_guest_freq: info.guest_freq,
                 vt_guest_tsc: info.guest_tsc,
                 vt_hrtime: info.hrtime as i64,
                 vt_hres_sec: info.hrestime.as_secs(),
                 vt_hres_ns: info.hrestime.subsec_nanos() as u64,
                 vt_boot_hrtime: info.boot_hrtime,
+            }
+        }
+    }
+
+    impl From<vdi_tsc_freq_v1> for TscFreqInfoV1 {
+        fn from(raw: vdi_tsc_freq_v1) -> Self {
+            Self {
+                guest_freq: raw.vt_guest_freq,
+                host_freq: raw.vt_host_freq,
+                int_size: raw.vt_int_size as u8,
+                frac_size: raw.vt_frac_size as u8,
+            }
+        }
+    }
+    impl From<TscFreqInfoV1> for vdi_tsc_freq_v1 {
+        fn from(info: TscFreqInfoV1) -> Self {
+             Self {
+                vt_guest_freq: info.guest_freq,
+                vt_host_freq: info.guest_freq,
+                vt_int_size: info.int_size as u32,
+                vt_frac_size: info.frac_size as u32,
             }
         }
     }
@@ -735,6 +770,8 @@ pub mod migrate {
             let arch_entries: Vec<bhyve_api::vdi_field_entry_v1> =
                 vmm::data::read_many(hdl, -1, bhyve_api::VDC_VMM_ARCH, 1)?;
 
+            let tsc_freq_info = Self::read_tsc_freq_info(hdl)?;
+
             let timing_info: bhyve_api::vdi_timing_info_v1 =
                 vmm::data::read(hdl, -1, bhyve_api::VDC_VMM_TIMING, 1)?;
 
@@ -743,8 +780,15 @@ pub mod migrate {
                     .into_iter()
                     .map(From::from)
                     .collect(),
+                tsc_freq_info,
                 timing_info: TimingInfoV1::from(timing_info),
             })
+        }
+    
+        pub(super) fn read_tsc_freq_info(hdl: &VmmHdl) -> io::Result<TscFreqInfoV1> {
+            let tsc_freq_info: bhyve_api::vdi_tsc_freq_v1 = vmm::data::read(hdl, -1, bhyve_api::VDC_VMM_SCALING, 1)?;
+
+            Ok(TscFreqInfoV1::from(tsc_freq_info))
         }
 
         pub(super) fn write(self, hdl: &VmmHdl) -> io::Result<()> {
@@ -763,6 +807,16 @@ pub mod migrate {
                 1,
                 &mut arch_entries,
             )?; */
+
+            let tsc_freq_info = vdi_tsc_freq_v1::from(self.tsc_freq_info);
+            vmm::data::write(
+                hdl,
+                -1,
+                bhyve_api::VDC_VMM_SCALING,
+                1,
+                tsc_freq_info,
+            )?;
+
             let timing_info = vdi_timing_info_v1::from(self.timing_info);
             vmm::data::write(
                 hdl,
