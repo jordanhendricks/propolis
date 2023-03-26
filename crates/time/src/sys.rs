@@ -10,17 +10,20 @@ pub(crate) const CLOCK_HIGHRES: i32 = 4;
 
 /// clock_gettime(3c)
 #[cfg(target_os = "illumos")]
-fn clock_gettime(clockid: libc::clockid_t) -> Result<libc::timespec> {
+pub(crate) fn clock_gettime(clockid: libc::clockid_t) -> Result<libc::timespec> {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
 
-    let res = unsafe {
-        libc::clock_gettime(clockid, &mut ts);
+    let res;
+    unsafe {
+        res = libc::clock_gettime(clockid, &mut ts);
     };
 
-    match res {
-        -1 => Err(Error::last_os_error()),
-        Ok(ts) => ts,
+    if res == -1 {
+        return Err(Error::last_os_error());
     }
+    assert_eq!(res, 0);
+
+    Ok(ts)
 }
 
 #[cfg(not(target_os = "illumos"))]
