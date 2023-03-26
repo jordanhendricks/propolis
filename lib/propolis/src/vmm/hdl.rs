@@ -475,7 +475,7 @@ impl VmmHdl {
         src_wallclock: Duration,
         dest_wallclock: Duration,
     ) -> std::result::Result<u64, MigrateStateError> {
-        match Duration::checked_sub(dest_wallclock, src_wallclock) {
+        match dest_wallclock.checked_sub(src_wallclock) {
             Some(d) => {
                 let ns = d.as_nanos();
                 // TODO: limit on the delta we support
