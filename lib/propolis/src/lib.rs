@@ -22,7 +22,6 @@ pub mod migrate;
 pub mod mmio;
 pub mod pio;
 pub mod tasks;
-pub mod time;
 pub mod util;
 pub mod vcpu;
 pub mod vmm;

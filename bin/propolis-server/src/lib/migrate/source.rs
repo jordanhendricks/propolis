@@ -298,7 +298,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
             vmm_state = ron::ser::to_string(&raw)
                 .map_err(codec::ProtocolError::from)?;
         }
-        info!(self.log(), "VMM State: {#?}", vmm_state);
+        info!(self.log(), "VMM State: {:#?}", vmm_state);
         self.send_msg(codec::Message::Serialized(vmm_state)).await?;
         self.read_ok().await
     }

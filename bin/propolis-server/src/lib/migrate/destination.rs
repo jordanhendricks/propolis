@@ -334,7 +334,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
                 .map_err(codec::ProtocolError::from)?;
             let deserializer =
                 &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
-            hdl.import(deserializer)?;
+            vmm_hdl.import(deserializer)?;
         }
 
         self.send_msg(codec::Message::Okay).await
