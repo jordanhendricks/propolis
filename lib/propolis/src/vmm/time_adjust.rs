@@ -67,7 +67,7 @@ pub enum TimeAdjustError {
     #[error(
         "guest boot_hrtime cannot be represented:\
             desc=\"{desc}\", total_delta={total_delta:?},\
-            boot_hrtime={boot_hrtime}, dst_hrtime={dst_hrtime:?}"
+            dst_hrtime={dst_hrtime:?}"
     )]
     BootHrtimeOverflow {
         /// error description
@@ -75,9 +75,6 @@ pub enum TimeAdjustError {
 
         /// calculated total delta (uptime + migration delta)
         total_delta: Duration,
-
-        /// input guest boot_hrtime
-        boot_hrtime: Hrtime,
 
         /// destination host hrtime
         dst_hrtime: Duration,
@@ -115,6 +112,9 @@ pub enum TimeAdjustError {
 }
 
 /// Returns a non-atomic snapshot of the current hrtime and wall clock time.
+///
+/// Note: We use clock_gettime(3c) interfaces on illumos directly here instead
+/// of the std::time::SystemTime interfaces, as those are as subject to change.
 // TODO: We may want to put a bound in here to make sure the two
 // values are close enough, and we may want that to be tunable. What's the
 // best tuning mechanism here? And what should the bound be?
@@ -169,6 +169,7 @@ pub fn calc_guest_uptime(
     src_hrt: u64,
     boot_hrtime: Hrtime,
 ) -> Result<Duration, TimeAdjustError> {
+    // convert input to 128-bits so we can check for overflow
     let src_hrt_ns: i128 = src_hrt as i128;
     let boot_hrt_ns: i128 = boot_hrtime as i128;
     let uptime: u128;
@@ -235,19 +236,8 @@ pub fn calc_boot_hrtime_delta(
 ///
 pub fn calc_boot_hrtime(
     total_delta: Duration,
-    boot_hrtime: Hrtime,
     dst_hrtime: Duration,
 ) -> Result<Hrtime, TimeAdjustError> {
-    // Find the new boot_hrtime: cur_hrtime - total_delta
-    if dst_hrtime.as_nanos() > i128::MAX as u128 {
-        return Err(TimeAdjustError::BootHrtimeOverflow {
-            desc: "dst_hrtime > 64 bits".to_string(),
-            total_delta,
-            boot_hrtime,
-            dst_hrtime,
-        });
-    }
-
     let dst_hrt_ns: i128 = dst_hrtime.as_nanos() as i128;
     let adjusted_bhrt: i128;
     match dst_hrt_ns.checked_sub_unsigned(total_delta.as_nanos()) {
@@ -258,7 +248,6 @@ pub fn calc_boot_hrtime(
             return Err(TimeAdjustError::BootHrtimeOverflow {
                 desc: "dst_hrtime - total_delta".to_string(),
                 total_delta,
-                boot_hrtime,
                 dst_hrtime,
             });
         }
@@ -269,7 +258,6 @@ pub fn calc_boot_hrtime(
         return Err(TimeAdjustError::BootHrtimeOverflow {
             desc: "boot_hrtime to i64".to_string(),
             total_delta,
-            boot_hrtime,
             dst_hrtime,
         });
     }
@@ -284,6 +272,8 @@ pub fn calc_tsc_delta(
     migrate_delta: Duration,
     guest_hz: u64,
 ) -> Result<u64, TimeAdjustError> {
+    assert_ne!(guest_hz, 0);
+
     let delta_ns: u128 = migrate_delta.as_nanos();
     let mut tsc_adjust: u128 = 0;
 
@@ -299,17 +289,7 @@ pub fn calc_tsc_delta(
         });
     }
 
-    if let Some(v) = upper.checked_div(NS_PER_SEC) {
-        tsc_adjust = v;
-    } else {
-        return Err(TimeAdjustError::TscAdjustOverflow {
-            desc: "(migrate_delta * guest_hz) / NS_PER_SEC".to_string(),
-            migrate_delta,
-            guest_hz,
-            tsc_adjust,
-        });
-    }
-
+    tsc_adjust = upper / NS_PER_SEC;
     if tsc_adjust > u64::MAX as u128 {
         return Err(TimeAdjustError::TscAdjustOverflow {
             desc: "tsc_adjust > 64-bits".to_string(),
@@ -334,15 +314,286 @@ pub fn calc_guest_tsc(tsc: u64, adjust: u64) -> Result<u64, TimeAdjustError> {
 mod test {
     use std::time::Duration;
 
-    use crate::vmm::time_adjust::calc_tsc_delta;
+    use crate::vmm::time_adjust::{
+        calc_boot_hrtime_delta, calc_guest_uptime, calc_tsc_delta, NS_PER_SEC,
+    };
 
-    // TODO: write more tests here
+    use super::{
+        calc_boot_hrtime, calc_guest_tsc, calc_migrate_delta, Hrtime,
+        TimeAdjustError,
+    };
+
+    #[test]
+    fn test_calc_migrate_delta() {
+        // valid input
+        let res = calc_migrate_delta(
+            Duration::from_nanos(0),
+            Duration::from_nanos(1),
+        );
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), Duration::from_nanos(1));
+        let res = calc_migrate_delta(
+            Duration::from_nanos(0),
+            Duration::from_nanos(0),
+        );
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), Duration::from_nanos(0));
+
+        // error case: dst_wc < src_wc
+        let res = calc_migrate_delta(
+            Duration::from_nanos(1),
+            Duration::from_nanos(0),
+        );
+        assert!(res.is_err());
+        assert!(matches!(
+            res,
+            Err(TimeAdjustError::InvalidMigrateDelta { .. })
+        ));
+    }
+
+    struct Gutv {
+        hrt: u64,
+        bhrt: Hrtime,
+        res: Duration,
+    }
+    const GUEST_UPTIME_TESTS_VALID: &'static [Gutv] = &[
+        // boot_hrtime > 0
+        // guest was booted on this host, or was migrated to a host with higher
+        // uptime than itself
+        Gutv { hrt: 1, bhrt: 0, res: Duration::from_nanos(1) },
+        Gutv {
+            hrt: 300_000_000_000,
+            bhrt: 200_000_000_000,
+            res: Duration::from_nanos(100_000_000_000),
+        },
+        Gutv {
+            hrt: i64::MAX as u64,
+            bhrt: i64::MAX - 1,
+            res: Duration::from_nanos(1),
+        },
+        // src_hrt == boot_hrtime
+        Gutv { hrt: 0, bhrt: 0, res: Duration::from_nanos(0) },
+        Gutv {
+            hrt: 300_000_000_000,
+            bhrt: 300_000_000_000,
+            res: Duration::from_nanos(0),
+        },
+        Gutv {
+            hrt: i64::MAX as u64,
+            bhrt: i64::MAX,
+            res: Duration::from_nanos(0),
+        },
+        // src_hrt < boot_hrtime
+        // guest came from a host with less uptime than itself
+        Gutv { hrt: 1000, bhrt: -100, res: Duration::from_nanos(1100) },
+        Gutv {
+            hrt: i64::MAX as u64,
+            bhrt: 0,
+            res: Duration::from_nanos(i64::MAX as u64),
+        },
+        Gutv {
+            hrt: 0,
+            bhrt: i64::MIN + 1,
+            res: Duration::from_nanos((-(i64::MIN + 1)) as u64),
+        },
+    ];
+    struct Guti {
+        hrt: u64,
+        bhrt: Hrtime,
+    }
+    const GUEST_UPTIME_TESTS_INVALID: &'static [Guti] = &[
+        // src_hrt - boot_hrtime underflows i64
+        Guti { hrt: 0, bhrt: i64::MAX },
+        // (src_hrt - boot_hrtime) overflows u64
+        Guti { hrt: u64::MAX, bhrt: -1 },
+    ];
+
+    #[test]
+    fn test_calc_guest_uptime() {
+        // valid cases
+        for i in 0..GUEST_UPTIME_TESTS_VALID.len() {
+            let t = &GUEST_UPTIME_TESTS_VALID[i];
+
+            let msg = format!(
+                "src_hrtime={}, boot_hrtime={}, expected={:?}",
+                t.hrt, t.bhrt, t.res
+            );
+            let res = calc_guest_uptime(t.hrt, t.bhrt);
+            match res {
+                Ok(v) => {
+                    assert_eq!(v, t.res, "got incorrect value: {}", msg);
+                }
+                Err(e) => {
+                    assert!(false, "got error {}: {}", e, msg);
+                }
+            }
+        }
+
+        // error cases
+        for i in 0..GUEST_UPTIME_TESTS_INVALID.len() {
+            let t = &GUEST_UPTIME_TESTS_INVALID[i];
+            let msg = format!("src_hrtime={}, boot_hrtime={}", t.hrt, t.bhrt,);
+            let res = calc_guest_uptime(t.hrt, t.bhrt);
+            match res {
+                Ok(v) => {
+                    assert!(
+                        false,
+                        "expected error but got value {:?}: {}",
+                        v, msg
+                    );
+                }
+                Err(TimeAdjustError::GuestUptimeOverflow { .. }) => {
+                    // test passes
+                }
+                Err(e) => {
+                    assert!(false, "got incorrect error type {:?}: {}", e, msg);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_calc_boot_hrtime_delta() {
+        // valid input
+        let res = calc_boot_hrtime_delta(
+            Duration::from_nanos(1),
+            Duration::from_nanos(1),
+        );
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), Duration::from_nanos(2));
+
+        let res = calc_boot_hrtime_delta(
+            Duration::from_secs(u64::MAX),
+            Duration::from_nanos(NS_PER_SEC as u64 - 1),
+        );
+        assert!(res.is_ok());
+        assert_eq!(
+            res.unwrap(),
+            Duration::new(u64::MAX, (NS_PER_SEC as u32) - 1)
+        );
+
+        // error case: uptime + migrate_delta overflows Duration
+        let res = calc_boot_hrtime_delta(
+            Duration::from_secs(u64::MAX),
+            Duration::from_nanos(NS_PER_SEC as u64),
+        );
+        assert!(res.is_err());
+        assert!(matches!(res, Err(TimeAdjustError::TimeDeltaOverflow { .. })));
+    }
+
+    #[test]
+    fn test_calc_boot_hrtime() {
+        // valid input
+
+        // positive boot_hrtime result
+        // 4 days, 1 min, 500 ns
+        let dst_hrtime = Duration::new(4 * 24 * 60 * 60 + 60, 500);
+        // 3 days, 300 ns
+        let total_delta = Duration::new(3 * 24 * 60 * 60, 300);
+        // 1 day, 1 min, 200 ns
+        let expect: Hrtime = (1 * 24 * 60 * 60 + 60) * NS_PER_SEC as i64 + 200;
+        let res = calc_boot_hrtime(total_delta, dst_hrtime);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), expect);
+
+        // negative boot_hrtime result
+        // 3 days, 300 ns
+        let dst_hrtime = Duration::new(3 * 24 * 60 * 60, 300);
+        // 4 days, 1 min, 500 ns
+        let total_delta = Duration::new(4 * 24 * 60 * 60 + 60, 500);
+        // - (1 day, 1 min, 200 ns)
+        let expect: Hrtime =
+            -((1 * 24 * 60 * 60 + 60) * NS_PER_SEC as i64 + 200);
+        let res = calc_boot_hrtime(total_delta, dst_hrtime);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), expect);
+
+        // error cases
+
+        // dst_hrtime - total_delta underflows i128
+        let dst_hrtime = Duration::from_nanos(0);
+        let total_delta = Duration::from_secs(u64::MAX);
+        let res = calc_boot_hrtime(total_delta, dst_hrtime);
+        assert!(res.is_err());
+        assert!(matches!(res, Err(TimeAdjustError::BootHrtimeOverflow { .. })));
+
+        // dst_hrtime - total_delta overflows/underflows i64
+        let dst_hrtime = Duration::from_nanos(u64::MAX);
+        let total_delta = Duration::from_nanos(0);
+        let res = calc_boot_hrtime(total_delta, dst_hrtime);
+        assert!(res.is_err());
+        assert!(matches!(res, Err(TimeAdjustError::BootHrtimeOverflow { .. })));
+
+        let dst_hrtime = Duration::from_nanos(0);
+        let total_delta = Duration::from_nanos(i64::MAX as u64 + 2);
+        let res = calc_boot_hrtime(total_delta, dst_hrtime);
+        assert!(res.is_err());
+        assert!(matches!(res, Err(TimeAdjustError::BootHrtimeOverflow { .. })));
+    }
+
     #[test]
     fn test_calc_tsc_delta() {
-        // basic tests
-        assert!(matches!(
-            calc_tsc_delta(Duration::from_nanos(1_000_000_000), 1_000_000_000),
-            Ok(1_000_000_000)
-        ));
+        // valid input
+
+        // 1 GHz, 1 second
+        let migrate_delta = Duration::from_nanos(NS_PER_SEC as u64);
+        let guest_hz = 1_000_000_000;
+        let expect = NS_PER_SEC as u64;
+        let res = calc_tsc_delta(migrate_delta, guest_hz);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), expect);
+
+        // 1 GHz, 20 seconds
+        let migrate_delta = Duration::from_nanos(NS_PER_SEC as u64 * 20);
+        let guest_hz = 1_000_000_000;
+        let expect = NS_PER_SEC as u64 * 20;
+        let res = calc_tsc_delta(migrate_delta, guest_hz);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), expect);
+
+        // 2.5 GHz, 1 second
+        let migrate_delta = Duration::from_nanos(NS_PER_SEC as u64);
+        let guest_hz = 2_500_000_000;
+        let expect = 2_500_000_000;
+        let res = calc_tsc_delta(migrate_delta, guest_hz);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), expect);
+
+        // 2.5 GHz, 20 seconds
+        let migrate_delta = Duration::from_nanos(NS_PER_SEC as u64 * 20);
+        let guest_hz = 2_500_000_000;
+        let expect = 50_000_000_000;
+        let res = calc_tsc_delta(migrate_delta, guest_hz);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), expect);
+
+        // error cases
+
+        // delta * guest_hz overflows u128
+        let migrate_delta = Duration::from_secs(u64::MAX);
+        let guest_hz = u64::MAX;
+        let res = calc_tsc_delta(migrate_delta, guest_hz);
+        assert!(res.is_err());
+        assert!(matches!(res, Err(TimeAdjustError::TscAdjustOverflow { .. })));
+
+        // (delta * guest_hz) / NS_PER_SEC overflows u64
+        let migrate_delta = Duration::from_secs(u64::MAX);
+        let guest_hz = 1_000_000_000;
+        let res = calc_tsc_delta(migrate_delta, guest_hz);
+        assert!(res.is_err());
+        assert!(matches!(res, Err(TimeAdjustError::TscAdjustOverflow { .. })));
+    }
+
+    #[test]
+    fn test_calc_guest_tsc() {
+        // valid input
+        let res = calc_guest_tsc(1_000_000_000, 1_000_000_000);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 2_000_000_000);
+
+        // error case: tsc + adjust overflows u64
+        let res = calc_guest_tsc(u64::MAX, 1);
+        assert!(res.is_err());
+        assert!(matches!(res, Err(TimeAdjustError::GuestTscOverflow { .. })));
     }
 }

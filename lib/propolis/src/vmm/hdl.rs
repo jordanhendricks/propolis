@@ -508,11 +508,8 @@ impl VmmHdl {
             time_adjust::calc_boot_hrtime_delta(vm_uptime, migrate_delta)?;
 
         // Get the new boot_hrtime.
-        let adj_boot_hrtime = time_adjust::calc_boot_hrtime(
-            boot_hrtime_delta,
-            timing_data.boot_hrtime,
-            dst_time.hrtime,
-        )?;
+        let adj_boot_hrtime =
+            time_adjust::calc_boot_hrtime(boot_hrtime_delta, dst_time.hrtime)?;
 
         // Get the guest TSC adjustment.
         let tsc_delta =
