@@ -108,7 +108,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         let res = match step {
             MigratePhase::MigrateSync => self.sync().await,
             MigratePhase::Pause => self.pause().await,
+            MigratePhase::TimeDataRead => self.time_data_read().await,
             MigratePhase::RamPush => self.ram_push().await,
+            MigratePhase::TimeData => self.time_data().await,
             MigratePhase::DeviceState => self.device_state().await,
             MigratePhase::RamPull => self.ram_pull().await,
             MigratePhase::ServerState => self.server_state().await,
@@ -128,7 +130,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         // TODO: Optimize RAM transfer so that most memory can be transferred
         // prior to pausing.
         self.run_phase(MigratePhase::Pause).await?;
+        self.run_phase(MigratePhase::TimeDataRead).await?;
         self.run_phase(MigratePhase::RamPush).await?;
+        self.run_phase(MigratePhase::TimeData).await?;
         self.run_phase(MigratePhase::DeviceState).await?;
         self.run_phase(MigratePhase::RamPull).await?;
         self.run_phase(MigratePhase::ServerState).await?;
@@ -248,21 +252,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         info!(self.log(), "Pausing devices");
         self.command_tx.send(MigrateSourceCommand::Pause).await.unwrap();
         let resp = self.response_rx.recv().await.unwrap();
-        if !matches!(resp, MigrateSourceResponse::Pause(Ok(()))) {
-            info!(
-                self.log(),
-                "Unexpected pause response from state worker: {:?}", resp
-            );
-            return Err(MigrateError::SourcePause);
+        match resp {
+            MigrateSourceResponse::Pause(Ok(())) => Ok(()),
+            _ => {
+                info!(
+                    self.log(),
+                    "Unexpected pause response from state worker: {:?}", resp
+                );
+                Err(MigrateError::SourcePause)
+            }
         }
-
-        // Fetch the timing data values after we pause, but before lengthier
-        // migration steps, so we can correctly account for migration time in
-        // our adjustments.
-        self.timing_data_snapshot().await
     }
 
-    async fn timing_data_snapshot(&mut self) -> Result<(), MigrateError> {
+    async fn time_data_read(&mut self) -> Result<(), MigrateError> {
         let instance_guard = self.vm_controller.instance().lock();
         let vmm_hdl = &instance_guard.machine().hdl;
         let raw = vmm_hdl.export_vm()?;
@@ -313,14 +315,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         .await?;
 
         self.send_msg(codec::Message::Okay).await?;
-        self.read_ok().await?;
+        self.read_ok().await
+    }
 
+    async fn time_data(&mut self) -> Result<(), MigrateError> {
         // Migrate VMM-wide data
         let vmm_data = self.vmm_data.as_mut().unwrap();
         let vmm_state = ron::ser::to_string(&vmm_data)
             .map_err(codec::ProtocolError::from)?;
         info!(self.log(), "VMM State: {:#?}", vmm_state);
         self.send_msg(codec::Message::Serialized(vmm_state)).await?;
+
         self.read_ok().await
     }
 

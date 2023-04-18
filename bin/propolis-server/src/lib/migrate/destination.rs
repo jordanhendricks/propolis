@@ -99,11 +99,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
         let res = match step {
             MigratePhase::MigrateSync => self.sync().await,
 
-            // no pause step on the dest side
+            // no pause / time data read steps on the dest side
             MigratePhase::Pause => unreachable!(),
+            MigratePhase::TimeDataRead => unreachable!(),
 
             MigratePhase::RamPush => self.ram_push().await,
             MigratePhase::DeviceState => self.device_state().await,
+            MigratePhase::TimeData => self.time_data().await,
             MigratePhase::RamPull => self.ram_pull().await,
             MigratePhase::ServerState => self.server_state().await,
             MigratePhase::Finish => self.finish().await,
@@ -119,6 +121,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
 
         self.run_phase(MigratePhase::MigrateSync).await?;
         self.run_phase(MigratePhase::RamPush).await?;
+        self.run_phase(MigratePhase::TimeData).await?;
         self.run_phase(MigratePhase::DeviceState).await?;
         self.run_phase(MigratePhase::RamPull).await?;
         self.run_phase(MigratePhase::ServerState).await?;
@@ -323,8 +326,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
                 }
             }
         }
-        self.send_msg(codec::Message::Okay).await?;
+        self.send_msg(codec::Message::Okay).await
+    }
 
+    async fn time_data(&mut self) -> Result<(), MigrateError> {
         // Update VMM data
         let vmm_state: String = match self.read_msg().await? {
             codec::Message::Serialized(encoded) => encoded,
@@ -341,7 +346,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
                 .map_err(codec::ProtocolError::from)?;
             let deserializer =
                 &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
-            vmm_hdl.import(deserializer)?;
+            vmm_hdl.import(deserializer, self.log())?;
         }
 
         self.send_msg(codec::Message::Okay).await

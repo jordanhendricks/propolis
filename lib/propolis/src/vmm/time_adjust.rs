@@ -3,30 +3,14 @@
 use std::time::Duration;
 use thiserror::Error;
 
-use time;
-
 const NS_PER_SEC: u128 = 1_000_000_000;
 
 /// Convenience type for hrtime_t
 pub type Hrtime = i64;
 
-/// "Snapshot" (read: not atomic) of the host's wall clock and high res clock
-pub struct HostTime {
-    pub hrtime: Duration,
-    pub wall_clock: Duration,
-}
-
 /// Errors related to making timing adjustment calcultions
 #[derive(Clone, Debug, Error)]
 pub enum TimeAdjustError {
-    /// Error reading system clock
-    #[error("could not read system wall clock: {0}")]
-    RealTimeClock(String),
-
-    /// Error reading high res clock
-    #[error("could not read system monotonic clock: {0}")]
-    HighResClock(String),
-
     /// Error calculating migration time delta
     #[error("invalid migration delta: src={src_wc:?},dst={dst_wc:?}")]
     InvalidMigrateDelta {
@@ -109,39 +93,6 @@ pub enum TimeAdjustError {
         /// calculated TSC adjustment
         adjust: u64,
     },
-}
-
-/// Returns a non-atomic snapshot of the current hrtime and wall clock time.
-///
-/// Note: We use clock_gettime(3c) interfaces on illumos directly here instead
-/// of the std::time::SystemTime interfaces, as those are as subject to change.
-// TODO: We may want to put a bound in here to make sure the two
-// values are close enough, and we may want that to be tunable. What's the
-// best tuning mechanism here? And what should the bound be?
-// We could also just punt on this for now.
-pub fn host_time_snapshot() -> Result<HostTime, TimeAdjustError> {
-    let hrtime;
-    let wall_clock;
-
-    match time::get_highres_time() {
-        Ok(hrt) => {
-            hrtime = hrt;
-        }
-        Err(e) => {
-            return Err(TimeAdjustError::HighResClock(e.to_string()));
-        }
-    };
-
-    match time::get_real_time() {
-        Ok(wc) => {
-            wall_clock = wc;
-        }
-        Err(e) => {
-            return Err(TimeAdjustError::RealTimeClock(e.to_string()));
-        }
-    }
-
-    Ok(HostTime { hrtime, wall_clock })
 }
 
 /// Find the perceived wall clock time difference between when timing data

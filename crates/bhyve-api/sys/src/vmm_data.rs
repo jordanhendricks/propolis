@@ -224,7 +224,6 @@ pub struct vdi_time_info_v1 {
 }
 
 // VDC_VMM_ARCH v1 data identifiers
-// TODO: fix this up when illumos 15143 lands
 
 // VM-wide:
 

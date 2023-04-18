@@ -4,8 +4,6 @@ use std::io::{Error, ErrorKind, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use slog::Logger;
-
 use crate::accessors::*;
 use crate::hw;
 use crate::mmio::MmioBus;
@@ -173,8 +171,7 @@ impl Machine {
 ///     // Override any desired VM creation options
 ///     ..Default::default()
 /// };
-/// let log = todo!();
-/// let builder = Builder::new("my-machine", log, opts).unwrap()
+/// let builder = Builder::new("my-machine", opts).unwrap()
 ///     .max_cpus(4).unwrap()
 ///     .add_mem_region(0, 0xc000_0000, "lowmem").unwrap()
 ///     .add_mem_region(0x1_0000_0000, 0xc000_0000, "highmem").unwrap()
@@ -198,8 +195,8 @@ impl Builder {
     /// # Arguments
     /// - `name`: The name for the new instance.
     /// - `force`: If true, deletes the VM if it already exists.
-    pub fn new(name: &str, log: Logger, opts: CreateOpts) -> Result<Self> {
-        let hdl = Arc::new(create_vm(name, log, opts)?);
+    pub fn new(name: &str, opts: CreateOpts) -> Result<Self> {
+        let hdl = Arc::new(create_vm(name, opts)?);
         let physmap = Some(PhysMap::new(MAX_PHYSMEM, hdl.clone()));
         Ok(Self { inner_hdl: Some(hdl), max_cpu: 1, physmap })
     }

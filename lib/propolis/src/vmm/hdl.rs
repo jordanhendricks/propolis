@@ -14,8 +14,6 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use slog::Logger;
-
 use crate::common::PAGE_SIZE;
 use crate::vmm::mem::Prot;
 
@@ -43,11 +41,7 @@ pub struct CreateOpts {
 /// # Arguments
 /// - `name`: The name of the VM to create.
 /// - `opts`: Creation options (detailed in `CreateOpts`)
-pub(crate) fn create_vm(
-    name: &str,
-    log: Logger,
-    opts: CreateOpts,
-) -> Result<VmmHdl> {
+pub(crate) fn create_vm(name: &str, opts: CreateOpts) -> Result<VmmHdl> {
     let ctl = bhyve_api::VmmCtlFd::open()?;
 
     let mut req = bhyve_api::vm_create_req::new(name);
@@ -83,7 +77,6 @@ pub(crate) fn create_vm(
         inner,
         destroyed: AtomicBool::new(false),
         name: name.to_string(),
-        log: Some(log),
         #[cfg(test)]
         is_test_hdl: false,
     })
@@ -126,7 +119,6 @@ pub struct VmmHdl {
     pub(super) inner: bhyve_api::VmmFd,
     destroyed: AtomicBool,
     name: String,
-    log: Option<Logger>,
 
     #[cfg(test)]
     /// Track if this VmmHdl belongs to a wholly fictitious Instance/Machine.
@@ -434,28 +426,30 @@ impl VmmHdl {
     pub fn import(
         &self,
         deserializer: &mut dyn Deserializer,
+        log: &Logger,
     ) -> std::result::Result<(), MigrateStateError> {
         let mut imported: BhyveVmV1 = erased_serde::deserialize(deserializer)?;
 
-        // Update guest timing-related data to adjust for migration time and
+        // Update guest time-related data to adjust for migration time and
         // movement across hosts before writing state back to the VMM.
-        self.adjust_timing_data(&mut imported.timing_info)?;
+        let adjusted = self.adjust_time_data(imported.time_info, log)?;
+        imported.time_info = adjusted;
 
         imported.write(self)?;
         Ok(())
     }
 
-    /// Update guest timing-related data to account for how much time has
-    /// elapsed since the VMM timing data was read on the source.
+    /// Update guest time-related data to account for how much time has
+    /// elapsed since the VMM time data was read on the source.
     ///
     ///
     /// We need to update the guest-related fields of
-    /// [`BhyveVmV1::TimingInfoV1`] as such:
+    /// [`BhyveVmV1::TimeInfoV1`] as such:
     ///
-    /// - (`guest_tsc`)[TimingInfoV1::guest_tsc], the guest TSC
+    /// - (`guest_tsc`)[TimeInfoV1::guest_tsc], the guest TSC
     /// value at migration time, which is used by bhyve to calculate the guest's
     /// TSC offset.
-    /// - (`boot_hrtime`)[TimingInfoV1::boot_hrtime], which represents
+    /// - (`boot_hrtime`)[TimeInfoV1::boot_hrtime], which represents
     /// the hrtime on the host for when the VM booted. This is a relative value
     /// used to normalize device timers on the kernel side, so it will be
     /// negative if the guest has a longer uptime than the host it's running on.
@@ -467,42 +461,41 @@ impl VmmHdl {
     /// actually arriving in-kernel.
     ///
     /// In order to make those adjustments, we need to also update the
-    /// host-related fields of [TimingInfoV1]:
+    /// host-related fields of [TimeInfoV1]:
     ///
-    /// - (`hrtime`)[TimingInfoV1::hrtime]: the host hrtime (monotonic clock)
+    /// - (`hrtime`)[TimeInfoV1::hrtime]: the host hrtime (monotonic clock)
     /// when these adjustments were made
-    /// - (`hrestime`)[TimingInfoV1::hrestime]: the host hrestime (wall clock)
+    /// - (`hrestime`)[TimeInfoV1::hrestime]: the host hrestime (wall clock)
     /// when these adjustments were made
     ///
     /// See the [`time_adjust`] module for more details about how the adjustment
     /// calculations here are performed.
-    fn adjust_timing_data(
+    fn adjust_time_data(
         &self,
-        timing_data: &mut TimingInfoV1,
-    ) -> std::result::Result<(), MigrateStateError> {
-        let log = self.log.as_ref().unwrap();
-
-        info!(log, "Adjusting timing data for guest: {:#?}", timing_data);
+        time_data: TimeInfoV1,
+        log: &Logger,
+    ) -> std::result::Result<TimeInfoV1, MigrateStateError> {
+        info!(log, "Adjusting time data for guest: {:#?}", time_data);
         probes::adj_time_begin!(|| (
-            timing_data.guest_freq,
-            timing_data.guest_tsc,
-            timing_data.boot_hrtime,
+            time_data.guest_freq,
+            time_data.guest_tsc,
+            time_data.boot_hrtime,
         ));
 
         // Take a snapshot of time on this host.
-        let dst_time = time_adjust::host_time_snapshot()?;
+        let (dst_hrtime, dst_wc) = migrate::vmm_time_snapshot(self).unwrap();
+        let src_wc =
+            Duration::new(time_data.hres_sec, time_data.hres_ns as u32);
+        let dst_hrtd = Duration::from_nanos(dst_hrtime);
 
         // Get the VM uptime.
         let vm_uptime = time_adjust::calc_guest_uptime(
-            timing_data.hrtime,
-            timing_data.boot_hrtime,
+            time_data.hrtime,
+            time_data.boot_hrtime,
         )?;
 
         // Compute the delta for how long migration took, using wall clock time.
-        let migrate_delta = time_adjust::calc_migrate_delta(
-            timing_data.hrestime,
-            dst_time.wall_clock,
-        )?;
+        let migrate_delta = time_adjust::calc_migrate_delta(src_wc, dst_wc)?;
 
         // Find the total time delta we need to adjust for `boot_hrtime`.
         let boot_hrtime_delta =
@@ -510,13 +503,13 @@ impl VmmHdl {
 
         // Get the new boot_hrtime.
         let adj_boot_hrtime =
-            time_adjust::calc_boot_hrtime(boot_hrtime_delta, dst_time.hrtime)?;
+            time_adjust::calc_boot_hrtime(boot_hrtime_delta, dst_hrtd)?;
 
         // Get the guest TSC adjustment.
         let tsc_delta =
-            time_adjust::calc_tsc_delta(migrate_delta, timing_data.guest_freq)?;
+            time_adjust::calc_tsc_delta(migrate_delta, time_data.guest_freq)?;
         let adj_guest_tsc =
-            time_adjust::calc_guest_tsc(timing_data.guest_tsc, tsc_delta)?;
+            time_adjust::calc_guest_tsc(time_data.guest_tsc, tsc_delta)?;
 
         info!(
             log,
@@ -524,40 +517,44 @@ impl VmmHdl {
             - guest TSC freq: {} Hz = {} GHz\n\
             - guest uptime: {:?}\n\
             - migration time delta: {:?}\n\
-            - guest_tsc adjustment = {} + {} ---> {}\n\
+            - guest_tsc adjustment = {} + {} = {}\n\
             - boot_hrtime adjustment = {} ---> {} - {} = {}\n\
             - dest highres clock time: {}\n\
             - dest wall clock time: {:?}",
-            timing_data.guest_freq,
-            timing_data.guest_freq as f64 / 1_000_000_000f64,
+            time_data.guest_freq,
+            time_data.guest_freq as f64 / 1_000_000_000f64,
             vm_uptime,
             migrate_delta,
-            timing_data.guest_tsc,
+            time_data.guest_tsc,
             tsc_delta,
             adj_guest_tsc,
-            timing_data.boot_hrtime,
-            timing_data.hrtime,
+            time_data.boot_hrtime,
+            time_data.hrtime,
             boot_hrtime_delta.as_nanos(),
             adj_boot_hrtime,
-            dst_time.hrtime.as_nanos(),
-            dst_time.wall_clock,
+            dst_hrtime,
+            dst_wc,
         );
 
-        // Update the timing data with the adjustments and current host times.
-        timing_data.guest_tsc = adj_guest_tsc;
-        timing_data.boot_hrtime = adj_boot_hrtime;
-        timing_data.hrtime = dst_time.hrtime.as_nanos() as u64;
-        timing_data.hrestime = dst_time.wall_clock;
+        // Update the time data with the adjustments and current host times.
+        let res = TimeInfoV1 {
+            guest_freq: time_data.guest_freq,
+            guest_tsc: adj_guest_tsc,
+            hrtime: dst_hrtime,
+            hres_sec: dst_wc.as_secs(),
+            hres_ns: dst_wc.subsec_nanos() as u64,
+            boot_hrtime: adj_boot_hrtime,
+        };
 
         probes::adj_time_end!(|| (
-            timing_data.guest_freq,
-            timing_data.guest_tsc,
-            timing_data.boot_hrtime,
+            res.guest_freq,
+            res.guest_tsc,
+            res.boot_hrtime,
             vm_uptime.as_nanos() as u64,
             migrate_delta.as_nanos() as u64,
         ));
 
-        Ok(())
+        Ok(res)
     }
 */
 
@@ -583,7 +580,6 @@ impl VmmHdl {
             inner,
             destroyed: AtomicBool::new(false),
             name: "TEST-ONLY VMM INSTANCE".to_string(),
-            log: None,
             is_test_hdl: true,
         })
     }
@@ -608,3 +604,142 @@ mod probes {
     ) {
     }
 }
+<<<<<<< HEAD
+=======
+
+pub mod migrate {
+    use std::{io, time::Duration};
+
+    use bhyve_api::{vdi_field_entry_v1, vdi_time_info_v1};
+    use serde::{Deserialize, Serialize};
+
+    use crate::vmm;
+
+    use super::VmmHdl;
+
+    #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+    pub struct BhyveVmV1 {
+        pub arch_entries: Vec<ArchEntryV1>,
+        pub time_info: TimeInfoV1,
+    }
+
+    #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
+    pub struct ArchEntryV1 {
+        pub ident: u32,
+        pub value: u64,
+    }
+
+    #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
+    pub struct TimeInfoV1 {
+        /// guest TSC frequency (hz)
+        pub guest_freq: u64,
+
+        /// guest TSC
+        pub guest_tsc: u64,
+
+        /// monotonic host clock (ns)
+        pub hrtime: u64,
+
+        /// wall clock host clock (sec)
+        pub hres_sec: u64,
+
+        /// wall clock host clock (ns)
+        pub hres_ns: u64,
+
+        /// guest boot_hrtime (can be negative)
+        pub boot_hrtime: i64,
+    }
+
+    impl From<vdi_field_entry_v1> for ArchEntryV1 {
+        fn from(raw: vdi_field_entry_v1) -> Self {
+            Self { ident: raw.vfe_ident, value: raw.vfe_value }
+        }
+    }
+    impl From<ArchEntryV1> for vdi_field_entry_v1 {
+        fn from(entry: ArchEntryV1) -> Self {
+            vdi_field_entry_v1 {
+                vfe_ident: entry.ident,
+                vfe_value: entry.value,
+                ..Default::default()
+            }
+        }
+    }
+
+    impl From<vdi_time_info_v1> for TimeInfoV1 {
+        fn from(raw: vdi_time_info_v1) -> Self {
+            Self {
+                guest_freq: raw.vt_guest_freq,
+                guest_tsc: raw.vt_guest_tsc,
+                hrtime: raw.vt_hrtime as u64,
+                hres_sec: raw.vt_hres_sec,
+                hres_ns: raw.vt_hres_ns,
+                boot_hrtime: raw.vt_boot_hrtime,
+            }
+        }
+    }
+    impl From<TimeInfoV1> for vdi_time_info_v1 {
+        fn from(info: TimeInfoV1) -> Self {
+            vdi_time_info_v1 {
+                vt_guest_freq: info.guest_freq,
+                vt_guest_tsc: info.guest_tsc,
+                vt_hrtime: info.hrtime as i64,
+                vt_hres_sec: info.hres_sec,
+                vt_hres_ns: info.hres_ns,
+                vt_boot_hrtime: info.boot_hrtime,
+            }
+        }
+    }
+
+    impl TimeInfoV1 {
+        pub(super) fn read(hdl: &VmmHdl) -> io::Result<Self> {
+            let time_info: bhyve_api::vdi_time_info_v1 =
+                vmm::data::read(hdl, -1, bhyve_api::VDC_VMM_TIME, 1)?;
+
+            Ok(TimeInfoV1::from(time_info))
+        }
+
+        pub(super) fn write(self, hdl: &VmmHdl) -> io::Result<()> {
+            let time_info = vdi_time_info_v1::from(self);
+            vmm::data::write(hdl, -1, bhyve_api::VDC_VMM_TIME, 1, time_info)?;
+
+            Ok(())
+        }
+    }
+
+    impl BhyveVmV1 {
+        pub(super) fn read(hdl: &VmmHdl) -> io::Result<Self> {
+            let arch_entries: Vec<bhyve_api::vdi_field_entry_v1> =
+                vmm::data::read_many(hdl, -1, bhyve_api::VDC_VMM_ARCH, 1)?;
+
+            let time_info = TimeInfoV1::read(hdl)?;
+
+            Ok(Self {
+                arch_entries: arch_entries
+                    .into_iter()
+                    .map(From::from)
+                    .collect(),
+                time_info,
+            })
+        }
+
+        pub(super) fn write(self, hdl: &VmmHdl) -> io::Result<()> {
+            // Ignore arch entries, as there are no writable arch entries at
+            // this time.
+
+            TimeInfoV1::write(self.time_info, hdl)?;
+
+            Ok(())
+        }
+    }
+
+    pub(crate) fn vmm_time_snapshot(
+        hdl: &VmmHdl,
+    ) -> io::Result<(u64, Duration)> {
+        let ti = TimeInfoV1::read(hdl)?;
+
+        let d = Duration::new(ti.hres_sec, ti.hres_ns as u32);
+        let res = (ti.hrtime, d);
+        Ok(res)
+    }
+}
+>>>>>>> dc208cc (Updates based on review feedback)

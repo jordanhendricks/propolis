@@ -1,7 +1,7 @@
 #!/usr/sbin/dtrace -s
 
 /*
- * Provides visibility into adjustments made on timing-related data on a
+ * Provides visibility into adjustments made on time-related data on a
  * destination live migration host.
  *
  * Usage: ./time_adjustments.d <propolis-server PID>
@@ -62,10 +62,10 @@ propolis$1:::adj_time_end
 	migrate_time = args[4];
 }
 
-fbt::vmm_data_write_vmm_timing:entry
+fbt::vmm_data_write_vmm_time:entry
 {
 	self->vm = (struct vm *)args[0];
-	self->req = (struct vdi_timing_info_v1 *)args[1]->vdr_data;
+	self->req = (struct vdi_time_info_v1 *)args[1]->vdr_data;
 	self->ts = timestamp;
 
 	this->gf = self->req->vt_guest_freq;
@@ -91,11 +91,10 @@ fbt::vmm_data_write_vmm_timing:entry
 	}
 }
 
-fbt::vmm_data_write_vmm_timing:return
+fbt::vmm_data_write_vmm_time:return
 / self->vm /
 {
 	if (args[1] == 0) {
-		krn_adj_gtsc = self->vm->base_guest_tsc;
 		krn_adj_bhrt = self->vm->boot_hrtime;
 		krn_adj_gf = self->vm->guest_freq;
 	} else {
@@ -108,7 +107,13 @@ fbt::vmm_data_write_vmm_timing:return
 	self->req = 0;
 	self->ts = 0;
 
-	printf("timing data imported; press CTRL+C for summary\n");
+	printf("time data imported; press CTRL+C for summary\n");
+}
+
+fbt::calc_tsc_offset:entry
+/ self->vm /
+{
+	krn_adj_gtsc = args[1];
 }
 
 dtrace:::END

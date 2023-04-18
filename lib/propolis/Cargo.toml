@@ -16,7 +16,6 @@ num_enum.workspace = true
 thiserror.workspace = true
 bhyve_api.workspace = true
 dladm.workspace = true
-time.workspace = true
 viona_api.workspace = true
 propolis_types.workspace = true
 usdt.workspace = true
