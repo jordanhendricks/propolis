@@ -600,14 +600,12 @@ impl std::ops::DerefMut for InnerGuard<'_> {
 
 fn build_instance(
     name: &str,
-    log: slog::Logger,
     max_cpu: u8,
     lowmem: usize,
     highmem: usize,
 ) -> Result<propolis::Instance> {
     let mut builder = Builder::new(
         name,
-        log,
         propolis::vmm::CreateOpts { force: true, ..Default::default() },
     )?
     .max_cpus(max_cpu)?
@@ -689,7 +687,7 @@ fn setup_instance(
 
     slog::info!(log, "Creating VM with {} vCPUs, {} lowmem, {} highmem",
         cpus, lowmem, highmem;);
-    let pinst = build_instance(vm_name, log.clone(), cpus, lowmem, highmem)
+    let pinst = build_instance(vm_name, cpus, lowmem, highmem)
         .context("Failed to create VM Instance")?;
     let inst = Instance::new(pinst, config.clone(), from_restore, log.clone());
     slog::info!(log, "VM created"; "name" => vm_name);

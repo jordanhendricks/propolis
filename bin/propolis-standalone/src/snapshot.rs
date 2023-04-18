@@ -229,7 +229,7 @@ pub(crate) async fn restore(
             &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
 
         // Restore it
-        hdl.import(deserializer).context("Failed to import global VM state")?;
+        hdl.import(deserializer, log).context("Failed to import global VM state")?;
     }
 
     // Next are the devices
