@@ -410,9 +410,12 @@ impl VmmHdl {
     // TODO: Hacky and strictly tied to migration versioning. Want to think of
     // a better way to structure this.
     pub fn export_vm(
+=======
+    pub fn export_time_data(
+>>>>>>> aa34617 (saving state)
         &self,
-    ) -> std::result::Result<BhyveVmV1, MigrateStateError> {
-        Ok(BhyveVmV1::read(self)?)
+    ) -> std::result::Result<TimeInfoV1, MigrateStateError> {
+        Ok(TimeInfoV1::read(self)?)
     }
 
     /// Export the global VMM state.
@@ -604,8 +607,6 @@ mod probes {
     ) {
     }
 }
-<<<<<<< HEAD
-=======
 
 pub mod migrate {
     use std::{io, time::Duration};
@@ -742,4 +743,3 @@ pub mod migrate {
         Ok(res)
     }
 }
->>>>>>> dc208cc (Updates based on review feedback)

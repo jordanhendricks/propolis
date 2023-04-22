@@ -121,6 +121,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
 
         self.run_phase(MigratePhase::MigrateSync).await?;
         self.run_phase(MigratePhase::RamPush).await?;
+
+        // Import of the time data *must* be done before we import device
+        // state: the proper functioning of device timers depends on an adjusted
+        // boot_hrtime.
         self.run_phase(MigratePhase::TimeData).await?;
         self.run_phase(MigratePhase::DeviceState).await?;
         self.run_phase(MigratePhase::RamPull).await?;
@@ -330,19 +334,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
     }
 
     async fn time_data(&mut self) -> Result<(), MigrateError> {
-        // Update VMM data
-        let vmm_state: String = match self.read_msg().await? {
+        let time_data: String = match self.read_msg().await? {
             codec::Message::Serialized(encoded) => encoded,
             msg => {
-                error!(self.log(), "arch state: unexpected message: {msg:?}");
+                error!(self.log(), "time data: unexpected message: {msg:?}");
                 return Err(MigrateError::UnexpectedMessage);
             }
         };
-        info!(self.log(), "VMM State: {:?}", vmm_state);
+        info!(self.log(), "VMM Time Data: {:?}", time_data);
         {
             let instance_guard = self.vm_controller.instance().lock();
             let vmm_hdl = &instance_guard.machine().hdl;
-            let mut deserializer = ron::Deserializer::from_str(&vmm_state)
+            let mut deserializer = ron::Deserializer::from_str(&time_data)
                 .map_err(codec::ProtocolError::from)?;
             let deserializer =
                 &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
