@@ -2,6 +2,7 @@ use bitvec::prelude as bv;
 use futures::{SinkExt, StreamExt};
 use propolis::common::GuestAddr;
 use propolis::migrate::{MigrateCtx, MigrateStateError, Migrator};
+use propolis::vmm;
 use slog::{error, info, trace, warn};
 use std::convert::TryInto;
 use std::io;
@@ -99,7 +100,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
         let res = match step {
             MigratePhase::MigrateSync => self.sync().await,
 
-            // no pause / time data read steps on the dest side
+            // no pause or time data read steps on the dest side
             MigratePhase::Pause => unreachable!(),
             MigratePhase::TimeDataRead => unreachable!(),
 
@@ -121,6 +122,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
 
         self.run_phase(MigratePhase::MigrateSync).await?;
         self.run_phase(MigratePhase::RamPush).await?;
+
+        // Import of the time data *must* be done before we import device
+        // state: the proper functioning of device timers depends on an adjusted
+        // boot_hrtime.
         self.run_phase(MigratePhase::TimeData).await?;
         self.run_phase(MigratePhase::DeviceState).await?;
         self.run_phase(MigratePhase::RamPull).await?;
@@ -329,24 +334,65 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
         self.send_msg(codec::Message::Okay).await
     }
 
+    // Get the guest time data from the source, make updates to it based on the
+    // new host, and write the data out to bhvye.
     async fn time_data(&mut self) -> Result<(), MigrateError> {
-        // Update VMM data
-        let vmm_state: String = match self.read_msg().await? {
+        let time_data: String = match self.read_msg().await? {
             codec::Message::Serialized(encoded) => encoded,
             msg => {
-                error!(self.log(), "arch state: unexpected message: {msg:?}");
+                error!(self.log(), "time data: unexpected message: {msg:?}");
                 return Err(MigrateError::UnexpectedMessage);
             }
         };
-        info!(self.log(), "VMM State: {:?}", vmm_state);
+        info!(self.log(), "VMM Time Data: {:?}", time_data);
         {
             let instance_guard = self.vm_controller.instance().lock();
             let vmm_hdl = &instance_guard.machine().hdl;
-            let mut deserializer = ron::Deserializer::from_str(&vmm_state)
+            let mut deserializer = ron::Deserializer::from_str(&time_data)
                 .map_err(codec::ProtocolError::from)?;
             let deserializer =
                 &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
-            vmm_hdl.import(deserializer, self.log())?;
+
+            // Deserialize the VmTimeData
+            let time_data_src: vmm::time::VmTimeData =
+                erased_serde::deserialize(deserializer).map_err(|e| {
+                    MigrateError::TimeData(format!(
+                        "VMM Time Data deserialization error: {}",
+                        e
+                    ))
+                })?;
+
+            // Take a snapshot of the host hrtime/wall clock time and adjust
+            // time data appropriately.
+            let (dst_hrt, dst_wc) = vmm::time::host_time_snapshot(vmm_hdl)
+                .map_err(|e| {
+                    MigrateError::TimeData(format!(
+                        "could not read host time: {}",
+                        e.to_string()
+                    ))
+                })?;
+            let time_data_dst = vmm::time::adjust_time_data(
+                time_data_src,
+                dst_hrt,
+                dst_wc,
+                self.log(),
+            )
+            .map_err(|e| {
+                MigrateError::TimeData(format!(
+                    "could not adjust VMM Time Data: {}",
+                    e.to_string()
+                ))
+            })?;
+
+            // Import the adjusted time data
+            vmm::time::import_time_data(vmm_hdl, time_data_dst).map_err(
+                |e| {
+                    MigrateError::TimeData(format!(
+                        "VMM Time Data import error: {}",
+                        e
+                    ))
+                },
+            )?;
         }
 
         self.send_msg(codec::Message::Okay).await

@@ -2,6 +2,7 @@ use futures::{SinkExt, StreamExt};
 use propolis::common::GuestAddr;
 use propolis::inventory::Order;
 use propolis::migrate::{MigrateCtx, MigrateStateError, Migrator};
+use propolis::vmm;
 use slog::{error, info, trace};
 use std::convert::TryInto;
 use std::io;
@@ -62,17 +63,9 @@ struct SourceProtocol<T: AsyncRead + AsyncWrite + Unpin + Send> {
     /// Transport to the destination Instance.
     conn: WebSocketStream<T>,
 
-    // TODO: A hacky way for now to hang onto the VMM timing data between
-    // migration phases.
-    //
-    // We want to read the VMM timing data as soon as we can after we pause the
-    // source, and make adjustments on the destination as close as we can to
-    // the end of the migration.
-    //
-    // This lets us hang on to the data between export in the pause phase,
-    // the send the data in the device_state phase, after the bulk of the
-    // migration time has passed.
-    vmm_data: Option<propolis::vmm::migrate::BhyveVmV1>,
+    /// Saved VM Time Data, which is read earlier in the protocol (TimeDataRead
+    /// phase) than it is sent (TimeData phase)
+    time_data: Option<propolis::vmm::time::VmTimeData>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
@@ -82,7 +75,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         response_rx: tokio::sync::mpsc::Receiver<MigrateSourceResponse>,
         conn: WebSocketStream<T>,
     ) -> Self {
-        Self { vm_controller, command_tx, response_rx, conn, vmm_data: None }
+        Self { vm_controller, command_tx, response_rx, conn, time_data: None }
     }
 
     fn log(&self) -> &slog::Logger {
@@ -264,12 +257,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         }
     }
 
+    // Read the VM Time Data and save it for later use in the protocol
     async fn time_data_read(&mut self) -> Result<(), MigrateError> {
         let instance_guard = self.vm_controller.instance().lock();
         let vmm_hdl = &instance_guard.machine().hdl;
-        let raw = vmm_hdl.export_vm()?;
-        self.vmm_data = Some(raw);
-        info!(self.log(), "VMM State: {:#?}", self.vmm_data);
+        let raw = vmm::time::export_time_data(vmm_hdl).map_err(|e| {
+            MigrateError::TimeData(format!("VMM Time Data export error: {}", e))
+        })?;
+        self.time_data = Some(raw);
+        info!(self.log(), "VMM Time Data: {:#?}", self.time_data);
 
         Ok(())
     }
@@ -318,12 +314,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         self.read_ok().await
     }
 
+    // Send earlier exported time data
     async fn time_data(&mut self) -> Result<(), MigrateError> {
-        // Migrate VMM-wide data
-        let vmm_data = self.vmm_data.as_mut().unwrap();
+        let vmm_data = self.time_data.as_mut().unwrap();
         let vmm_state = ron::ser::to_string(&vmm_data)
             .map_err(codec::ProtocolError::from)?;
-        info!(self.log(), "VMM State: {:#?}", vmm_state);
+        info!(self.log(), "VMM Time Data: {:#?}", vmm_state);
         self.send_msg(codec::Message::Serialized(vmm_state)).await?;
 
         self.read_ok().await
