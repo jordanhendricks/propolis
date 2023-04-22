@@ -213,7 +213,7 @@ impl Default for vdi_rtc_v2 {
 // VDC_VMM_TIME v1 interface
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, Default)]
 pub struct vdi_time_info_v1 {
     pub vt_guest_freq: u64,
     pub vt_guest_tsc: u64,
