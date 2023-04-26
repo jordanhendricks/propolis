@@ -524,18 +524,25 @@ impl VmmHdl {
             - boot_hrtime adjustment = {} ---> {} - {} = {}\n\
             - dest highres clock time: {}\n\
             - dest wall clock time: {:?}",
+
             time_data.guest_freq,
             time_data.guest_freq as f64 / 1_000_000_000f64,
+
             vm_uptime,
+
             migrate_delta,
+
             time_data.guest_tsc,
             tsc_delta,
             adj_guest_tsc,
+
             time_data.boot_hrtime,
-            time_data.hrtime,
+            dst_hrtd.as_nanos(),
             boot_hrtime_delta.as_nanos(),
             adj_boot_hrtime,
+
             dst_hrtime,
+
             dst_wc,
         );
 
