@@ -147,6 +147,10 @@ pub enum MigrateError {
     #[error("received out-of-phase message")]
     Phase,
 
+    /// Failed to export/import time data state
+    #[error("failed to migrate VMM time data: {0}")]
+    TimeData(String),
+
     /// Failed to export/import device state for migration
     #[error("failed to migrate device state: {0}")]
     DeviceState(#[from] MigrateStateError),
@@ -202,6 +206,7 @@ impl From<MigrateError> for HttpError {
             | MigrateError::UnexpectedMessage
             | MigrateError::SourcePause
             | MigrateError::Phase
+            | MigrateError::TimeData(_)
             | MigrateError::DeviceState(_)
             | MigrateError::RemoteError(_, _)
             | MigrateError::StateMachine(_) => {
