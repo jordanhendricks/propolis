@@ -34,9 +34,9 @@ pub(crate) mod history_buffer;
 mod probes {
     fn serial_close_recv() {}
     fn serial_new_ws() {}
-    fn serial_uart_write(n: u64) {}
+    fn serial_uart_write(n: usize) {}
     fn serial_uart_out() {}
-    fn serial_uart_read(n: u64) {}
+    fn serial_uart_read(n: usize) {}
     fn serial_inject_uart() {}
     fn serial_ws_recv() {}
 }

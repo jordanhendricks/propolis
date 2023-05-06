@@ -2,6 +2,7 @@ use bitvec::prelude as bv;
 use futures::{SinkExt, StreamExt};
 use propolis::common::GuestAddr;
 use propolis::migrate::{MigrateCtx, MigrateStateError, Migrator};
+use propolis::vmm;
 use slog::{error, info, trace, warn};
 use std::convert::TryInto;
 use std::io;
@@ -349,7 +350,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
                 .map_err(codec::ProtocolError::from)?;
             let deserializer =
                 &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
-            vmm_hdl.import(deserializer, self.log())?;
+
+            //vmm_hdl.import(deserializer, self.log())?;
+            // TODO: error
+            let imported: vmm::time::VmTimeData = erased_serde::deserialize(deserializer).unwrap();
+            let (dst_hrt, dst_wc) = vmm::time::host_time_snapshot(vmm_hdl).unwrap();
+            let adjusted = vmm::time::adjust_time_data(imported, dst_hrt, dst_wc, self.log());
+            vmm::time::import_time_data(vmm_hdl, adjusted.unwrap()).unwrap();
         }
 
         self.send_msg(codec::Message::Okay).await
