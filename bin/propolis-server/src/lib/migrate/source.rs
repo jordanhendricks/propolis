@@ -2,6 +2,7 @@ use futures::{SinkExt, StreamExt};
 use propolis::common::GuestAddr;
 use propolis::inventory::Order;
 use propolis::migrate::{MigrateCtx, MigrateStateError, Migrator};
+use propolis::vmm;
 use slog::{error, info, trace};
 use std::convert::TryInto;
 use std::io;
@@ -72,7 +73,7 @@ struct SourceProtocol<T: AsyncRead + AsyncWrite + Unpin + Send> {
     // This lets us hang on to the data between export in the pause phase,
     // the send the data in the device_state phase, after the bulk of the
     // migration time has passed.
-    time_data: Option<propolis::vmm::migrate::TimeInfoV1>,
+    time_data: Option<propolis::vmm::time::VmTimeData>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
@@ -267,7 +268,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
     async fn time_data_read(&mut self) -> Result<(), MigrateError> {
         let instance_guard = self.vm_controller.instance().lock();
         let vmm_hdl = &instance_guard.machine().hdl;
-        let raw = vmm_hdl.export_time_data()?;
+        // TODO: error handling
+        let raw = vmm::time::export_time_data(vmm_hdl).unwrap();
         self.time_data = Some(raw);
         info!(self.log(), "VMM Time Data: {:#?}", self.time_data);
 

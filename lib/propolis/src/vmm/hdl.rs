@@ -410,7 +410,6 @@ impl VmmHdl {
     // TODO: Hacky and strictly tied to migration versioning. Want to think of
     // a better way to structure this.
     pub fn export_vm(
-=======
     pub fn export_time_data(
 >>>>>>> aa34617 (saving state)
         &self,
@@ -418,6 +417,8 @@ impl VmmHdl {
         Ok(TimeInfoV1::read(self)?)
     }
 
+=======
+>>>>>>> 8e327b0 (Saving state)
     /// Export the global VMM state.
     pub fn export(
         &self,
@@ -435,12 +436,12 @@ impl VmmHdl {
 
         // Update guest time-related data to adjust for migration time and
         // movement across hosts before writing state back to the VMM.
-        let adjusted = self.adjust_time_data(imported.time_info, log)?;
-        imported.time_info = adjusted;
+        //let adjusted = self.adjust_time_data(imported.time_info, log)?;
+        //imported.time_info = adjusted;
 
         imported.write(self)?;
         Ok(())
-    }
+    }*/
 
     /// Update guest time-related data to account for how much time has
     /// elapsed since the VMM time data was read on the source.
@@ -473,7 +474,7 @@ impl VmmHdl {
     ///
     /// See the [`time_adjust`] module for more details about how the adjustment
     /// calculations here are performed.
-    fn adjust_time_data(
+    /*fn adjust_time_data(
         &self,
         time_data: TimeInfoV1,
         log: &Logger,
@@ -602,23 +603,10 @@ pub fn query_reservoir() -> Result<bhyve_api::vmm_resv_query> {
     Ok(data)
 }
 
-#[usdt::provider(provider = "propolis")]
-mod probes {
-    fn adj_time_begin(guest_freq: u64, guest_tsc: u64, boot_hrtime: i64) {}
-    fn adj_time_end(
-        guest_freq: u64,
-        guest_tsc: u64,
-        boot_hrtime: i64,
-        vm_uptime: u64,
-        migrate_delta: u64,
-    ) {
-    }
-}
-
 pub mod migrate {
-    use std::{io, time::Duration};
+    use std::io;
 
-    use bhyve_api::{vdi_field_entry_v1, vdi_time_info_v1};
+    use bhyve_api::vdi_field_entry_v1;
     use serde::{Deserialize, Serialize};
 
     use crate::vmm;
@@ -628,34 +616,12 @@ pub mod migrate {
     #[derive(Clone, Debug, Default, Deserialize, Serialize)]
     pub struct BhyveVmV1 {
         pub arch_entries: Vec<ArchEntryV1>,
-        pub time_info: TimeInfoV1,
     }
 
     #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
     pub struct ArchEntryV1 {
         pub ident: u32,
         pub value: u64,
-    }
-
-    #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
-    pub struct TimeInfoV1 {
-        /// guest TSC frequency (hz)
-        pub guest_freq: u64,
-
-        /// guest TSC
-        pub guest_tsc: u64,
-
-        /// monotonic host clock (ns)
-        pub hrtime: u64,
-
-        /// wall clock host clock (sec)
-        pub hres_sec: u64,
-
-        /// wall clock host clock (ns)
-        pub hres_ns: u64,
-
-        /// guest boot_hrtime (can be negative)
-        pub boot_hrtime: i64,
     }
 
     impl From<vdi_field_entry_v1> for ArchEntryV1 {
@@ -673,80 +639,22 @@ pub mod migrate {
         }
     }
 
-    impl From<vdi_time_info_v1> for TimeInfoV1 {
-        fn from(raw: vdi_time_info_v1) -> Self {
-            Self {
-                guest_freq: raw.vt_guest_freq,
-                guest_tsc: raw.vt_guest_tsc,
-                hrtime: raw.vt_hrtime as u64,
-                hres_sec: raw.vt_hres_sec,
-                hres_ns: raw.vt_hres_ns,
-                boot_hrtime: raw.vt_boot_hrtime,
-            }
-        }
-    }
-    impl From<TimeInfoV1> for vdi_time_info_v1 {
-        fn from(info: TimeInfoV1) -> Self {
-            vdi_time_info_v1 {
-                vt_guest_freq: info.guest_freq,
-                vt_guest_tsc: info.guest_tsc,
-                vt_hrtime: info.hrtime as i64,
-                vt_hres_sec: info.hres_sec,
-                vt_hres_ns: info.hres_ns,
-                vt_boot_hrtime: info.boot_hrtime,
-            }
-        }
-    }
-
-    impl TimeInfoV1 {
-        pub(super) fn read(hdl: &VmmHdl) -> io::Result<Self> {
-            let time_info: bhyve_api::vdi_time_info_v1 =
-                vmm::data::read(hdl, -1, bhyve_api::VDC_VMM_TIME, 1)?;
-
-            Ok(TimeInfoV1::from(time_info))
-        }
-
-        pub(super) fn write(self, hdl: &VmmHdl) -> io::Result<()> {
-            let time_info = vdi_time_info_v1::from(self);
-            vmm::data::write(hdl, -1, bhyve_api::VDC_VMM_TIME, 1, time_info)?;
-
-            Ok(())
-        }
-    }
-
     impl BhyveVmV1 {
         pub(super) fn read(hdl: &VmmHdl) -> io::Result<Self> {
             let arch_entries: Vec<bhyve_api::vdi_field_entry_v1> =
                 vmm::data::read_many(hdl, -1, bhyve_api::VDC_VMM_ARCH, 1)?;
 
-            let time_info = TimeInfoV1::read(hdl)?;
-
             Ok(Self {
                 arch_entries: arch_entries
                     .into_iter()
                     .map(From::from)
-                    .collect(),
-                time_info,
+                    .collect()
             })
         }
 
         pub(super) fn write(self, hdl: &VmmHdl) -> io::Result<()> {
-            // Ignore arch entries, as there are no writable arch entries at
-            // this time.
-
-            TimeInfoV1::write(self.time_info, hdl)?;
-
+            // No writable arch entries at this time
             Ok(())
         }
-    }
-
-    pub(crate) fn vmm_time_snapshot(
-        hdl: &VmmHdl,
-    ) -> io::Result<(u64, Duration)> {
-        let ti = TimeInfoV1::read(hdl)?;
-
-        let d = Duration::new(ti.hres_sec, ti.hres_ns as u32);
-        let res = (ti.hrtime, d);
-        Ok(res)
     }
 }
