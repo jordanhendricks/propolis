@@ -2,6 +2,7 @@ use bitvec::prelude as bv;
 use futures::{SinkExt, StreamExt};
 use propolis::common::GuestAddr;
 use propolis::migrate::{MigrateCtx, MigrateStateError, Migrator};
+use propolis::vmm;
 use slog::{error, info, trace, warn};
 use std::convert::TryInto;
 use std::io;
@@ -99,7 +100,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
         let res = match step {
             MigratePhase::MigrateSync => self.sync().await,
 
-            // no pause / time data read steps on the dest side
+            // no pause or time data read steps on the dest side
             MigratePhase::Pause => unreachable!(),
             MigratePhase::TimeDataRead => unreachable!(),
 
@@ -333,6 +334,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
         self.send_msg(codec::Message::Okay).await
     }
 
+    // Get the guest time data from the source, make updates to it based on the
+    // new host, and write the data out to bhvye.
     async fn time_data(&mut self) -> Result<(), MigrateError> {
         let time_data: String = match self.read_msg().await? {
             codec::Message::Serialized(encoded) => encoded,
@@ -349,7 +352,47 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
                 .map_err(codec::ProtocolError::from)?;
             let deserializer =
                 &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
-            vmm_hdl.import(deserializer, self.log())?;
+
+            // Deserialize the VmTimeData
+            let time_data_src: vmm::time::VmTimeData =
+                erased_serde::deserialize(deserializer).map_err(|e| {
+                    MigrateError::TimeData(format!(
+                        "VMM Time Data deserialization error: {}",
+                        e
+                    ))
+                })?;
+
+            // Take a snapshot of the host hrtime/wall clock time and adjust
+            // time data appropriately.
+            let (dst_hrt, dst_wc) = vmm::time::host_time_snapshot(vmm_hdl)
+                .map_err(|e| {
+                    MigrateError::TimeData(format!(
+                        "could not read host time: {}",
+                        e.to_string()
+                    ))
+                })?;
+            let time_data_dst = vmm::time::adjust_time_data(
+                time_data_src,
+                dst_hrt,
+                dst_wc,
+                self.log(),
+            )
+            .map_err(|e| {
+                MigrateError::TimeData(format!(
+                    "could not adjust VMM Time Data: {}",
+                    e.to_string()
+                ))
+            })?;
+
+            // Import the adjusted time data
+            vmm::time::import_time_data(vmm_hdl, time_data_dst).map_err(
+                |e| {
+                    MigrateError::TimeData(format!(
+                        "VMM Time Data import error: {}",
+                        e
+                    ))
+                },
+            )?;
         }
 
         self.send_msg(codec::Message::Okay).await

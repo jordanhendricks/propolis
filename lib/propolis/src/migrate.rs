@@ -1,4 +1,3 @@
-use crate::vmm::time_adjust;
 use crate::vmm::MemCtx;
 
 use erased_serde::{Deserializer, Serialize};
@@ -35,15 +34,6 @@ impl From<erased_serde::Error> for MigrateStateError {
 impl From<std::io::Error> for MigrateStateError {
     fn from(err: std::io::Error) -> Self {
         MigrateStateError::ImportFailed(err.to_string())
-    }
-}
-
-impl From<time_adjust::TimeAdjustError> for MigrateStateError {
-    fn from(err: time_adjust::TimeAdjustError) -> Self {
-        MigrateStateError::ImportFailed(format!(
-            "failed to import VMM timing data: {}",
-            err
-        ))
     }
 }
 
