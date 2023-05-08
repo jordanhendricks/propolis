@@ -32,7 +32,7 @@ pub struct Uart {
     reg_div_high: u8,
 
     thre_intr: bool, // Transmitter Holding Register Empty interrupt
-    intr_pin: bool,
+    pub intr_pin: bool,
 
     rx_fifo: Fifo,
     tx_fifo: Fifo,
