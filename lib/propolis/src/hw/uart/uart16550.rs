@@ -287,6 +287,7 @@ impl Uart {
             div_low: self.reg_div_low,
             div_high: self.reg_div_high,
             thre_state: self.thre_intr,
+            intr_pin: self.intr_pin,
             rx_fifo: self.rx_fifo.clone(),
             tx_fifo: self.tx_fifo.clone(),
         }
@@ -303,6 +304,7 @@ impl Uart {
         self.reg_div_low = state.div_low;
         self.reg_div_high = state.div_high;
         self.thre_intr = state.thre_state;
+        self.intr_pin = state.intr_pin;
         self.rx_fifo = state.rx_fifo.clone();
         self.tx_fifo = state.tx_fifo.clone();
     }
@@ -310,6 +312,7 @@ impl Uart {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Fifo {
+    // TODO: call this capacity
     len: usize,
     buf: VecDeque<u8>,
 }
@@ -357,6 +360,7 @@ pub mod migrate {
         pub div_low: u8,
         pub div_high: u8,
         pub thre_state: bool,
+        pub intr_pin: bool,
         pub rx_fifo: Fifo,
         pub tx_fifo: Fifo,
     }
