@@ -19,6 +19,7 @@ struct UartState {
     uart: Uart,
     irq_pin: Box<dyn IntrPin>,
     auto_discard: bool,
+    paused: bool,
 }
 
 impl UartState {
@@ -44,6 +45,7 @@ impl LpcUart {
                 uart: Uart::new(),
                 irq_pin,
                 auto_discard: true,
+                paused: false,
             }),
             notify_readable: NotifierCell::new(),
             notify_writable: NotifierCell::new(),
@@ -99,6 +101,11 @@ impl LpcUart {
 impl Sink for LpcUart {
     fn write(&self, data: u8) -> bool {
         let mut state = self.state.lock().unwrap();
+
+        if state.paused {
+            return false;
+        }
+
         let res = state.uart.data_write(data);
         state.sync_intr_pin();
         res
@@ -110,6 +117,11 @@ impl Sink for LpcUart {
 impl Source for LpcUart {
     fn read(&self) -> Option<u8> {
         let mut state = self.state.lock().unwrap();
+
+        if state.paused {
+            return None;
+        }
+
         let res = state.uart.data_read();
         state.sync_intr_pin();
         res
@@ -146,6 +158,15 @@ impl Entity for LpcUart {
     fn migrate(&self) -> Migrator {
         Migrator::Custom(self)
     }
+
+    fn pause(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.paused = true;
+    }
+    fn resume(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.paused = false;
+    }
 }
 impl Migrate for LpcUart {
     fn export(&self, _ctx: &MigrateCtx) -> Box<dyn Serialize> {
@@ -164,11 +185,13 @@ impl Migrate for LpcUart {
         let mut state = self.state.lock().unwrap();
         state.uart.import(&deserialized.uart_state);
 
+        /*
         let intr_pin = state.uart.intr_state();
         state.uart.intr_pin = false;
         state.sync_intr_pin();
         state.uart.intr_pin = intr_pin;
         state.sync_intr_pin();
+        */
 
         Ok(())
     }
