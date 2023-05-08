@@ -163,6 +163,7 @@ impl Migrate for LpcUart {
             erased_serde::deserialize(deserializer)?;
         let mut state = self.state.lock().unwrap();
         state.uart.import(&deserialized.uart_state);
+        state.sync_intr_pin();
         Ok(())
     }
 }
