@@ -409,4 +409,19 @@ mod probes {
     fn migrate_phase_begin(step_desc: &str) {}
     fn migrate_phase_end(step_desc: &str) {}
     fn migrate_xfer_ram_page(addr: u64, size: u64) {}
+    fn migrate_time_data_before(
+        src_guest_freq: u64,
+        src_guest_tsc: u64,
+        src_boot_hrtime: i64,
+    ) {
+    }
+    fn migrate_time_data_after(
+        dst_guest_freq: u64,
+        dst_guest_tsc: u64,
+        dst_boot_hrtime: i64,
+        guest_uptime: u64,
+        migrate_delta_ns: u64,
+        migrate_delta_negative: bool,
+    ) {
+    }
 }

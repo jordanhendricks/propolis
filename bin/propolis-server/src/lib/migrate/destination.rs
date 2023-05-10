@@ -336,63 +336,108 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
     // Get the guest time data from the source, make updates to it based on the
     // new host, and write the data out to bhvye.
     async fn time_data(&mut self) -> Result<(), MigrateError> {
-        let time_data: String = match self.read_msg().await? {
+        // Read time data sent by the source and deserialize
+        let raw: String = match self.read_msg().await? {
             codec::Message::Serialized(encoded) => encoded,
             msg => {
                 error!(self.log(), "time data: unexpected message: {msg:?}");
                 return Err(MigrateError::UnexpectedMessage);
             }
         };
-        info!(self.log(), "VMM Time Data: {:?}", time_data);
-        {
-            let instance_guard = self.vm_controller.instance().lock();
-            let vmm_hdl = &instance_guard.machine().hdl;
-            let mut deserializer = ron::Deserializer::from_str(&time_data)
-                .map_err(codec::ProtocolError::from)?;
-            let deserializer =
-                &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
-
-            // Deserialize the VmTimeData
-            let time_data_src: vmm::time::VmTimeData =
-                erased_serde::deserialize(deserializer).map_err(|e| {
-                    MigrateError::TimeData(format!(
-                        "VMM Time Data deserialization error: {}",
-                        e
-                    ))
-                })?;
-
-            // Take a snapshot of the host hrtime/wall clock time and adjust
-            // time data appropriately.
-            let (dst_hrt, dst_wc) = vmm::time::host_time_snapshot(vmm_hdl)
-                .map_err(|e| {
-                    MigrateError::TimeData(format!(
-                        "could not read host time: {}",
-                        e.to_string()
-                    ))
-                })?;
-            let time_data_dst = vmm::time::adjust_time_data(
-                time_data_src,
-                dst_hrt,
-                dst_wc,
-                self.log(),
+        info!(self.log(), "VMM Time Data: {:?}", raw);
+        let mut deserializer = ron::Deserializer::from_str(&raw)
+            .map_err(codec::ProtocolError::from)?;
+        let deserializer =
+            &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
+        let time_data_src: vmm::time::VmTimeData =
+            erased_serde::deserialize(deserializer).map_err(|e| {
+                MigrateError::TimeData(format!(
+                    "VMM Time Data deserialization error: {}",
+                    e
+                ))
+            })?;
+        probes::migrate_time_data_before!(|| {
+            (
+                time_data_src.guest_freq,
+                time_data_src.guest_tsc,
+                time_data_src.boot_hrtime,
             )
+        });
+
+        // Take a snapshot of the host hrtime/wall clock time, then adjust
+        // time data appropriately.
+        let vmm_hdl = {
+            let instance_guard = self.vm_controller.instance().lock();
+            &instance_guard.machine().hdl.clone()
+        };
+        let (dst_hrt, dst_wc) = vmm::time::host_time_snapshot(vmm_hdl)
             .map_err(|e| {
                 MigrateError::TimeData(format!(
-                    "could not adjust VMM Time Data: {}",
+                    "could not read host time: {}",
                     e.to_string()
                 ))
             })?;
-
-            // Import the adjusted time data
-            vmm::time::import_time_data(vmm_hdl, time_data_dst).map_err(
-                |e| {
+        let (time_data_dst, adjust) =
+            vmm::time::adjust_time_data(time_data_src, dst_hrt, dst_wc)
+                .map_err(|e| {
                     MigrateError::TimeData(format!(
-                        "VMM Time Data import error: {}",
-                        e
+                        "could not adjust VMM Time Data: {}",
+                        e.to_string()
                     ))
-                },
-            )?;
+                })?;
+
+        // In case import fails, log adjustments made to time data and fire
+        // dtrace probe first
+        if adjust.migrate_delta_negative {
+            warn!(
+                self.log(),
+                "Found negative wall clock delta between target import \
+                and source export:\n\
+                - source wall clock time: {:?}\n\
+                - target wall clock time: {:?}\n",
+                time_data_src.wall_clock(),
+                dst_wc
+            );
         }
+        info!(
+            self.log(),
+            "Time data adjustments:\n\
+            - guest TSC freq: {} Hz = {} GHz\n\
+            - guest uptime ns: {:?}\n\
+            - migration time delta: {:?}\n\
+            - guest_tsc adjustment = {} + {} = {}\n\
+            - boot_hrtime adjustment = {} ---> {} - {} = {}\n\
+            - dest highres clock time: {}\n\
+            - dest wall clock time: {:?}",
+            time_data_dst.guest_freq,
+            time_data_dst.guest_freq as f64 / vmm::time::NS_PER_SEC as f64,
+            adjust.guest_uptime_ns,
+            adjust.migrate_delta,
+            time_data_src.guest_tsc,
+            adjust.guest_tsc_delta,
+            time_data_dst.guest_tsc,
+            time_data_src.boot_hrtime,
+            dst_hrt,
+            adjust.boot_hrtime_delta,
+            time_data_dst.boot_hrtime,
+            dst_hrt,
+            dst_wc
+        );
+        probes::migrate_time_data_after!(|| {
+            (
+                time_data_dst.guest_freq,
+                time_data_dst.guest_tsc,
+                time_data_dst.boot_hrtime,
+                adjust.guest_uptime_ns,
+                adjust.migrate_delta.as_nanos() as u64,
+                adjust.migrate_delta_negative,
+            )
+        });
+
+        // Import the adjusted time data
+        vmm::time::import_time_data(vmm_hdl, time_data_dst).map_err(|e| {
+            MigrateError::TimeData(format!("VMM Time Data import error: {}", e))
+        })?;
 
         self.send_msg(codec::Message::Okay).await
     }

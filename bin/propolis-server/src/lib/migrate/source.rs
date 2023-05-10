@@ -297,16 +297,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
 
     // Read and send over the time data
     async fn time_data(&mut self) -> Result<(), MigrateError> {
-        let vm_time_data = {
+        let vmm_hdl = {
             let instance_guard = self.vm_controller.instance().lock();
-            let vmm_hdl = &instance_guard.machine().hdl;
+            &instance_guard.machine().hdl.clone()
+        };
+        let vm_time_data =
             vmm::time::export_time_data(vmm_hdl).map_err(|e| {
                 MigrateError::TimeData(format!(
                     "VMM Time Data export error: {}",
                     e
                 ))
             })?;
-        };
         info!(self.log(), "VMM Time Data: {:#?}", vm_time_data);
 
         let time_data_serialized = ron::ser::to_string(&vm_time_data)
