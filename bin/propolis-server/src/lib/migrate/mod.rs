@@ -60,7 +60,6 @@ pub enum MigrateRole {
 enum MigratePhase {
     MigrateSync,
     Pause,
-    TimeDataRead,
     RamPush,
     TimeData,
     DeviceState,
@@ -74,7 +73,6 @@ impl std::fmt::Display for MigratePhase {
         let s = match self {
             MigratePhase::MigrateSync => "Sync",
             MigratePhase::Pause => "Pause",
-            MigratePhase::TimeDataRead => "TimeDataRead",
             MigratePhase::RamPush => "RamPush",
             MigratePhase::TimeData => "TimeData",
             MigratePhase::DeviceState => "DeviceState",

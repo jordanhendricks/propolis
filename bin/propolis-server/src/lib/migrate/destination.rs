@@ -100,9 +100,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
         let res = match step {
             MigratePhase::MigrateSync => self.sync().await,
 
-            // no pause or time data read steps on the dest side
+            // no pause steps on the dest side
             MigratePhase::Pause => unreachable!(),
-            MigratePhase::TimeDataRead => unreachable!(),
 
             MigratePhase::RamPush => self.ram_push().await,
             MigratePhase::DeviceState => self.device_state().await,

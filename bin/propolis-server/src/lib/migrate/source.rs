@@ -62,10 +62,6 @@ struct SourceProtocol<T: AsyncRead + AsyncWrite + Unpin + Send> {
 
     /// Transport to the destination Instance.
     conn: WebSocketStream<T>,
-
-    /// Saved VM Time Data, which is read earlier in the protocol (TimeDataRead
-    /// phase) than it is sent (TimeData phase)
-    time_data: Option<propolis::vmm::time::VmTimeData>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
@@ -75,7 +71,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         response_rx: tokio::sync::mpsc::Receiver<MigrateSourceResponse>,
         conn: WebSocketStream<T>,
     ) -> Self {
-        Self { vm_controller, command_tx, response_rx, conn, time_data: None }
+        Self { vm_controller, command_tx, response_rx, conn }
     }
 
     fn log(&self) -> &slog::Logger {
@@ -101,7 +97,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         let res = match step {
             MigratePhase::MigrateSync => self.sync().await,
             MigratePhase::Pause => self.pause().await,
-            MigratePhase::TimeDataRead => self.time_data_read().await,
             MigratePhase::RamPush => self.ram_push().await,
             MigratePhase::TimeData => self.time_data().await,
             MigratePhase::DeviceState => self.device_state().await,
@@ -123,7 +118,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         // TODO: Optimize RAM transfer so that most memory can be transferred
         // prior to pausing.
         self.run_phase(MigratePhase::Pause).await?;
-        self.run_phase(MigratePhase::TimeDataRead).await?;
         self.run_phase(MigratePhase::RamPush).await?;
         self.run_phase(MigratePhase::TimeData).await?;
         self.run_phase(MigratePhase::DeviceState).await?;
@@ -257,19 +251,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         }
     }
 
-    // Read the VM Time Data and save it for later use in the protocol
-    async fn time_data_read(&mut self) -> Result<(), MigrateError> {
-        let instance_guard = self.vm_controller.instance().lock();
-        let vmm_hdl = &instance_guard.machine().hdl;
-        let raw = vmm::time::export_time_data(vmm_hdl).map_err(|e| {
-            MigrateError::TimeData(format!("VMM Time Data export error: {}", e))
-        })?;
-        self.time_data = Some(raw);
-        info!(self.log(), "VMM Time Data: {:#?}", self.time_data);
-
-        Ok(())
-    }
-
     async fn device_state(&mut self) -> Result<(), MigrateError> {
         self.update_state(MigrationState::Device).await;
         let mut device_states = vec![];
@@ -314,13 +295,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         self.read_ok().await
     }
 
-    // Send earlier exported time data
+    // Read and send over the time data
     async fn time_data(&mut self) -> Result<(), MigrateError> {
-        let vmm_data = self.time_data.as_mut().unwrap();
-        let vmm_state = ron::ser::to_string(&vmm_data)
+        let vm_time_data = {
+            let instance_guard = self.vm_controller.instance().lock();
+            let vmm_hdl = &instance_guard.machine().hdl;
+            vmm::time::export_time_data(vmm_hdl).map_err(|e| {
+                MigrateError::TimeData(format!(
+                    "VMM Time Data export error: {}",
+                    e
+                ))
+            })?;
+        };
+        info!(self.log(), "VMM Time Data: {:#?}", vm_time_data);
+
+        let time_data_serialized = ron::ser::to_string(&vm_time_data)
             .map_err(codec::ProtocolError::from)?;
-        info!(self.log(), "VMM Time Data: {:#?}", vmm_state);
-        self.send_msg(codec::Message::Serialized(vmm_state)).await?;
+        info!(self.log(), "VMM Time Data: {:#?}", time_data_serialized);
+        self.send_msg(codec::Message::Serialized(time_data_serialized)).await?;
 
         self.read_ok().await
     }

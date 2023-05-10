@@ -1,14 +1,11 @@
 use serde::{Deserialize, Serialize};
-use slog::info;
+use slog::{info, warn};
 use std::time::Duration;
 use thiserror::Error;
 
 use super::VmmHdl;
 
 pub(crate) const NS_PER_SEC: u128 = 1_000_000_000;
-
-/// Convenience type for hrtime_t
-pub(crate) type Hrtime = i64;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct VmTimeData {
@@ -79,6 +76,18 @@ pub fn export_time_data(hdl: &VmmHdl) -> std::io::Result<VmTimeData> {
     Ok(VmTimeData::from(time_info))
 }
 
+/// Returns the current host hrtime and wall clock time
+//
+// The hrtime and wall clock time are exposed via the VMM time data interface.
+// These values are available on the system by doing a read of the VMM time
+// data.
+//
+// The kernel side of the interface disables interrupts while it takes the clock
+// readings; in the absence of a function to translate between the two clock
+// values, this is a best effort way to read the hrtime and wall clock times as
+// close to as possible at the same point in time. Thus fishing this data out of
+// the VMM time data read payload is strictly better than calling
+// clock_gettime(3c) twice from userspace.
 pub fn host_time_snapshot(hdl: &VmmHdl) -> std::io::Result<(i64, Duration)> {
     let ti = export_time_data(hdl)?;
     let wc = Duration::new(ti.hres_sec, ti.hres_ns as u32);
@@ -100,18 +109,13 @@ mod probes {
     }
 }
 
-/// Given an input representation of guest time data on a source host, and a current host hrtime
-/// and wallclock time on a target, output an "adjusted" view of the guest time
-/// data. This data can be imported to bhyve to allow guest time (namely, the
-/// TSC and device timers) to continue functioning on the host.
-///
-/// The guest TSC is moved forward to account for the migration delta
-/// (calculated via the source data and the target wall clock time).
-///
-/// The guest boot_hrtime is changed to represent the hrtime of the host when
-/// the guest would have been booted, namely:
-///     target hrtime - (guest uptime on source + migrate delta)
-///
+/// Given an input representation of guest time data on a source host, and a
+/// current host hrtime and wallclock time on the target host, output an
+/// "adjusted" view of the guest time data. This data can be imported to bhyve
+/// to allow guest time (namely, the guest TSC and its device timers) to allow
+/// the guest's sense of time to function properly on the target.
+//  See comments inline for more details about how we calculate a new guest TSC
+//  and boot_hrtime.
 pub fn adjust_time_data(
     src: VmTimeData,
     dst_hrt: i64,
@@ -125,24 +129,127 @@ pub fn adjust_time_data(
         src.boot_hrtime,
     ));
 
-    // Get the VM uptime.
-    let vm_uptime = calc_guest_uptime(src.hrtime, src.boot_hrtime)?;
+    // Find delta between export on source and import on target using wall clock
+    // time. This delta is used for adjusting the TSC and boot_hrtime.
+    //
+    // We expect to be operating on machines with well-synchronized wall
+    // clocks, so using wall clock time is a useful shorthand for observing how
+    // much time has passed. If for some reason we see a negative delta (see
+    // also: #357), clamp the delta to 0.
+    //
+    // migrate_delta = target wall clock - source wall clock
+    let migrate_delta = match dst_wc.checked_sub(src.wall_clock()) {
+        Some(d) => d,
+        None => {
+            warn!(
+                log,
+                "Found negative wall clock delta between target import \
+                and source export:\n\
+                - source wall clock: {:?}\n\
+                - target wall clock: {:?}\n",
+                src.wall_clock(),
+                dst_wc
+            );
+            Duration::from_secs(0)
+        }
+    };
 
-    // Compute the delta for how long migration took, using wall clock time.
-    let migrate_delta = calc_migrate_delta(src.wall_clock(), dst_wc)?;
+    // Find a new boot_hrtime for the guest
+    //
+    // Device timers are scheduled based on hrtime of the host: For example, a
+    // timer that should fire after 1 second is scheduled as: host hrtime + 1s.
+    //
+    // When devices are exported for migration, time values are normalized
+    // against the guest's boot_hrtime on export, and de-normalized against
+    // boot_hrtime on import. The boot_hrtime of the guest is set to the hrtime
+    // of when the guest booted. Because this value is used on import to fix up
+    // timer values, it is critical to set this value prior to importing device
+    // state such that existing timers are normalized correctly. As with booting
+    // a guest, on the target, it should be set to the hrtime of the host when
+    // the guest would have booted, had it booted on that target.
+    //
+    // An example may be helpful. Consider a guest that has 5 days of uptime,
+    // booted on a host with 30 days of uptime. Suppose that guest is migrated
+    // with a device timer that should fire 1 second in the future.
+    //
+    // +=================================================================+
+    // | hrtime (source) | guest hrtime | boot_hrtime  | timer value     |
+    // +-----------------------------------------------------------------+
+    // | 30 days         | 5 days       |(30 - 5) days | src hrtime + 1s |
+    // |                 |              | 25 days      | 30 days + 1s    |
+    // +=================================================================+
+    //
+    // Suppose the guest is then migrated to a host with 100 days of uptime.
+    // On migration, the existing timer is normalized before export by
+    // subtracting out boot_hrtime:
+    //       normalized = timer - boot_hrtime
+    //                  = (30 days + 1 sec) - 25 days
+    //                  = 5 days + 1 sec
+    //
+    // When the timer is imported, it is denormalized by adding back in
+    // the new boot_hrtime. The timer should still fire 1 second from the
+    // current hrtime of the host. The target hrtime is 100 days, so the timer
+    // should fire at 100 days + 1 sec.
+    //
+    // Working backwards to get the new boot_hrtime, we have:
+    //
+    //       denormalized = normalized + boot_hrtime
+    //       boot_hrtime  = denormalized - normalized
+    //       boot_hrtime  = (100 days + 1 sec) - (5 days + 1 sec)
+    //       boot_hrtime  = 95 days
+    //
+    // And on the target, the timer should still fire 1 second into the future
+    // as expected:
+    //
+    // +=====================================================================+
+    // | hrtime (target) | guest hrtime | boot_hrtime   | timer value        |
+    // +---------------------------------------------------------------------+
+    // | 100 days        | 5 days       |(100 - 5) days |     5 days + 1 sec |
+    // |                 |              | 95 days       |   + 95 days        |
+    // |                 |              |               | = 100 days + 1 sec |
+    // +=====================================================================+
+    //
+    // NB: It is possible for boot_hrtime to be negative; this occurs if a
+    // guest has a longer uptime than its host (an expected common case for
+    // migration). This is okay: hrtime is a signed value, and the normalization
+    // maths still work with negative values.
+    //
 
-    // Find the total time delta we need to adjust for `boot_hrtime`.
-    let boot_hrtime_delta = calc_boot_hrtime_delta(vm_uptime, migrate_delta)?;
+    // vm_uptime   = source hrtime - boot_hrtime
+    let vm_uptime = (src.hrtime as i64)
+        .checked_sub(src.boot_hrtime)
+        .ok_or_else(|| TimeAdjustError::GuestUptimeOverflow {
+            src_hrt: src.hrtime as i64,
+            boot_hrtime: src.boot_hrtime,
+        })?;
 
-    // Get the new boot_hrtime.
-    let adj_boot_hrtime = calc_boot_hrtime(
-        boot_hrtime_delta,
-        Duration::from_nanos(dst_hrt as u64),
-    )?;
+    // boot_hrtime_delta = vm_uptime + migrate_delta
+    let boot_hrtime_delta = vm_uptime
+        .checked_add(migrate_delta.as_nanos() as i64)
+        .ok_or_else(|| TimeAdjustError::TimeDeltaOverflow {
+            uptime_ns: vm_uptime,
+            migrate_delta,
+        })?;
 
-    // Get the guest TSC adjustment.
+    // boot_hrtime = target hrtime - boot_hrtime_delta
+    let new_boot_hrtime =
+        dst_hrt.checked_sub(boot_hrtime_delta).ok_or_else(|| {
+            TimeAdjustError::BootHrtimeOverflow {
+                total_delta: boot_hrtime_delta,
+                dst_hrtime: dst_hrt,
+            }
+        })?;
+
+    // Get the guest TSC adjustment and add it to the old guest TSC
+    //
+    // We move the guest TSC forward based on the migrate delta, such that the
+    // guest TSC reflects the time passed in migration (which will have paused
+    // the guest for some period of time).
+    //
+    // NB: It is okay to overflow the TSC here: It is possible for the guest to
+    // write to the TSC, and if it did so it might expect it to overflow.
     let tsc_delta = calc_tsc_delta(migrate_delta, src.guest_freq)?;
-    let adj_guest_tsc = calc_guest_tsc(src.guest_tsc, tsc_delta);
+    let new_guest_tsc = src.guest_tsc.wrapping_add(tsc_delta);
 
     info!(
         log,
@@ -160,30 +267,29 @@ pub fn adjust_time_data(
         migrate_delta,
         src.guest_tsc,
         tsc_delta,
-        adj_guest_tsc,
+        new_guest_tsc,
         src.boot_hrtime,
         dst_hrt,
-        boot_hrtime_delta.as_nanos(),
-        adj_boot_hrtime,
+        boot_hrtime_delta,
+        new_boot_hrtime,
         dst_hrt,
         dst_wc,
     );
 
-    // Update the time data with the adjustments and current host times.
     let res = VmTimeData {
         guest_freq: src.guest_freq,
-        guest_tsc: adj_guest_tsc,
+        guest_tsc: new_guest_tsc,
         hrtime: dst_hrt as u64,
         hres_sec: dst_wc.as_secs(),
         hres_ns: dst_wc.subsec_nanos() as u64,
-        boot_hrtime: adj_boot_hrtime,
+        boot_hrtime: new_boot_hrtime,
     };
 
     probes::adj_time_end!(|| (
         res.guest_freq,
         res.guest_tsc,
         res.boot_hrtime,
-        vm_uptime.as_nanos() as u64,
+        vm_uptime as u64,
         migrate_delta.as_nanos() as u64,
     ));
 
@@ -210,20 +316,20 @@ pub enum TimeAdjustError {
     )]
     GuestUptimeOverflow {
         /// source host hrtime
-        src_hrt: i128,
+        src_hrt: i64,
 
         /// input guest boot_hrtime
-        boot_hrtime: i128,
+        boot_hrtime: i64,
     },
 
     /// Invalid total delta for boot_hrtime calculations
     #[error(
-        "could not calculate time delta:\
-            guest uptime {uptime:?}, migrate_delta={migrate_delta:?}"
+        "could not calculate time delta: \
+            guest uptime {uptime_ns} ns, migrate_delta={migrate_delta:?}"
     )]
     TimeDeltaOverflow {
         /// guest uptime
-        uptime: Duration,
+        uptime_ns: i64,
 
         /// migration time delta
         migrate_delta: Duration,
@@ -231,24 +337,20 @@ pub enum TimeAdjustError {
 
     /// Invalid calculated boot_hrtime
     #[error(
-        "guest boot_hrtime cannot be represented:\
-            desc=\"{desc}\", total_delta={total_delta:?},\
-            dst_hrtime={dst_hrtime:?}"
+        "guest boot_hrtime cannot be represented: \
+            total_delta={total_delta:?}, dst_hrtime={dst_hrtime:?}"
     )]
     BootHrtimeOverflow {
-        /// error description
-        desc: &'static str,
-
         /// calculated total delta (uptime + migration delta)
-        total_delta: Duration,
+        total_delta: i64,
 
         /// destination host hrtime
-        dst_hrtime: Duration,
+        dst_hrtime: i64,
     },
 
     /// Invalid guest TSC adjustment
     #[error(
-        "could not calculate TSC adjustment:\
+        "could not calculate TSC adjustment: \
             desc=\"{desc:?}\", migrate_delta={migrate_delta:?},
             guest_hz={guest_hz}, tsc_adjust={tsc_adjust}"
     )]
@@ -265,128 +367,6 @@ pub enum TimeAdjustError {
         /// calculated TSC adjustment
         tsc_adjust: u128,
     },
-
-    /// Failed to read host hrtime/wall clock time
-    #[error("could not read host time: {0}")]
-    HostTimeRead(String),
-}
-
-/// Find the perceived wall clock time difference between when timing data
-/// was read on the source versus the current time on the destination.
-// TODO(#357): Right now we throw up our hands if the delta is negative.
-// On extremely short intervals between timing data read and write, I
-// sometimes saw a negative delta (~2 ms) on the lab systems I was testing on
-// before we switched them to use a local ntp server. We may want to consider
-// guard rails here (both positive and negative).
-fn calc_migrate_delta(
-    src_wc: Duration,
-    dst_wc: Duration,
-) -> Result<Duration, TimeAdjustError> {
-    match dst_wc.checked_sub(src_wc) {
-        Some(d) => Ok(d),
-        None => Err(TimeAdjustError::InvalidMigrateDelta { src_wc, dst_wc }),
-    }
-}
-
-/// Calculate guest uptime for a particular point in time, using its
-/// boot_hrtime and the hrtime of the host.
-///
-/// uptime = hrtime - boot_hrtime
-fn calc_guest_uptime(
-    src_hrt: u64,
-    boot_hrtime: Hrtime,
-) -> Result<Duration, TimeAdjustError> {
-    // convert input to 128-bits so we can check for overflow
-    let src_hrt_ns: i128 = src_hrt as i128;
-    let boot_hrt_ns: i128 = boot_hrtime as i128;
-    let uptime: u128;
-
-    match src_hrt_ns.checked_sub(boot_hrt_ns) {
-        Some(v) if v >= 0 => {
-            uptime = v as u128;
-        }
-        _ => {
-            return Err(TimeAdjustError::GuestUptimeOverflow {
-                src_hrt: src_hrt_ns,
-                boot_hrtime: boot_hrt_ns,
-            });
-        }
-    }
-
-    // Note: TryFrom<u128> for u64 is currently unstable
-    if uptime > u64::MAX as u128 {
-        return Err(TimeAdjustError::GuestUptimeOverflow {
-            src_hrt: src_hrt_ns,
-            boot_hrtime: boot_hrt_ns,
-        });
-    }
-
-    Ok(Duration::from_nanos(uptime as u64))
-}
-
-/// Calculate the total delta we need to use for updating the boot_hrtime:
-///
-/// boot_hrtime_delta = uptime + migrate_delta
-fn calc_boot_hrtime_delta(
-    uptime: Duration,
-    migrate_delta: Duration,
-) -> Result<Duration, TimeAdjustError> {
-    uptime.checked_add(migrate_delta).ok_or_else(|| {
-        TimeAdjustError::TimeDeltaOverflow { uptime, migrate_delta }
-    })
-}
-
-/// Calculate the new boot_hrtime for the guest.
-///
-/// The boot_hrtime is the hrtime of when a VM booted on the current host. In
-/// the case of live migration, this VM did not boot on this host, so we need
-/// to adjust to the boot_hrtime to be the "effective boot_hrtime": that is,
-/// what the hrtime of this host would have been when this VM booted.
-///
-/// To do so, we need several pieces of information:
-/// - the current hrtime of this host
-/// - the uptime of the VM
-/// - the migration time delta
-///
-/// And we can fix up the boot_hrtime as follows:
-///     boot_hrtime = cur_hrtime - (vm_uptime_ns + wallclock_delta)
-///
-/// The `vm_uptime_ns + wallclock_delta` term is `total_delta` here.
-///
-/// Note: It is possible for the boot_hrtime to be negative, in the case that
-/// the target host has a smaller uptime than the guest. This is okay: hrtime_t
-/// is signed, and the boot_hrtime is used by bhyve as a normalization value for
-/// device timers.
-///
-fn calc_boot_hrtime(
-    total_delta: Duration,
-    dst_hrtime: Duration,
-) -> Result<Hrtime, TimeAdjustError> {
-    let dst_hrt_ns: i128 = dst_hrtime.as_nanos() as i128;
-    let adjusted_bhrt: i128;
-    match dst_hrt_ns.checked_sub_unsigned(total_delta.as_nanos()) {
-        Some(v) => {
-            adjusted_bhrt = v;
-        }
-        None => {
-            return Err(TimeAdjustError::BootHrtimeOverflow {
-                desc: "dst_hrtime - total_delta",
-                total_delta,
-                dst_hrtime,
-            });
-        }
-    }
-
-    if (adjusted_bhrt < i64::MIN as i128) || (adjusted_bhrt > i64::MAX as i128)
-    {
-        return Err(TimeAdjustError::BootHrtimeOverflow {
-            desc: "boot_hrtime to i64",
-            total_delta,
-            dst_hrtime,
-        });
-    }
-
-    Ok(adjusted_bhrt as Hrtime)
 }
 
 /// Calculate the adjustment needed for the guest TSC.
@@ -429,11 +409,6 @@ fn calc_tsc_delta(
     }
 
     Ok(tsc_adjust as u64)
-}
-
-/// Calculate the new guest TSC, given an adjustment.
-fn calc_guest_tsc(tsc: u64, adjust: u64) -> u64 {
-    tsc.wrapping_add(adjust)
 }
 
 #[cfg(test)]

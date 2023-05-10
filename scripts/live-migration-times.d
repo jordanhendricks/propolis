@@ -85,7 +85,6 @@ dtrace:::END
 {
 	this->sync = "Sync";
 	this->pause = "Pause";
-	this->tdsend = "TimeDataSend";
 	this->rpush = "RamPush";
 	this->td = "TimeData";
 	this->dev = "DeviceState";
@@ -94,7 +93,6 @@ dtrace:::END
 
 	this->d_sync = delta[this->sync];
 	this->d_pause = delta[this->pause];
-	this->d_tdsend = delta[this->tdsend];
 	this->d_rpush = delta[this->rpush];
 	this->d_td = delta[this->td];
 	this->d_dev = delta[this->dev];
@@ -117,10 +115,6 @@ dtrace:::END
 	if (this->d_pause != 0) {
 		printf("%-15s %30d\n", this->pause, this->d_pause / 1000);
 		this->total += this->d_pause;
-	}
-	if (this->d_tdsend != 0) {
-		printf("%-15s %30d\n", this->tdsend, this->d_tdsend / 1000);
-		this->total += this->d_tdsend;
 	}
 	if (this->d_rpush != 0) {
 		printf("%-15s %30d\n", this->rpush, this->d_rpush / 1000);
