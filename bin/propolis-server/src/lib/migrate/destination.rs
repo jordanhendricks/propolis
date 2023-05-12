@@ -343,12 +343,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
             }
         };
         info!(self.log(), "VMM Time Data: {:?}", raw);
-        let mut deserializer = ron::Deserializer::from_str(&raw)
-            .map_err(codec::ProtocolError::from)?;
-        let deserializer =
-            &mut <dyn erased_serde::Deserializer>::erase(&mut deserializer);
-        let time_data_src: vmm::time::VmTimeData =
-            erased_serde::deserialize(deserializer).map_err(|e| {
+        let time_data_src: vmm::time::VmTimeData = ron::from_str(&raw).map_err(|e| {
                 MigrateError::TimeData(format!(
                     "VMM Time Data deserialization error: {}",
                     e
