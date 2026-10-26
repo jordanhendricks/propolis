@@ -84,6 +84,9 @@ pub struct Main {
     /// Default: Bhyve
     #[serde(default)]
     pub hv_interface: HypervisorInterface,
+
+    /// Enable TPM
+    pub tpm: bool,
 }
 
 /// The hypervisor interface to present to guest OSes.
