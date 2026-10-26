@@ -30,6 +30,7 @@ pub mod file_sink;
 pub mod madt;
 pub mod rsdp;
 pub mod ssdt_edk2;
+pub mod tpm2;
 pub mod xsdt;
 
 pub use dsdt::{Dsdt, DsdtConfig, DsdtDeviceType, DsdtGenerator, DsdtScope};
@@ -46,6 +47,7 @@ pub use rsdp::{
     RSDP_XSDT_ADDR_OFFSET,
 };
 pub use ssdt_edk2::{SsdtEdk2, SsdtEdk2Config};
+pub use tpm2::{Tpm2, Tpm2Config, TpmDevice};
 pub use xsdt::{Xsdt, XsdtConfig, XSDT_HEADER_LEN};
 
 // Values used to reference table checksums to recompute them after values are

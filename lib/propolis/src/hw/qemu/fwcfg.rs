@@ -1321,6 +1321,14 @@ pub mod formats {
         pub pci_window_64: PciWindow,
         pub dsdt_generators: &'a [&'a dyn acpi::DsdtGenerator],
         pub device_metadata: &'a DeviceMetadataMap,
+
+        /// Whether to advertise a TPM 2.0 to the guest.
+        ///
+        /// When set, a TPM2 table is generated and a matching TPM device is
+        /// declared in the DSDT. Nothing in Propolis services the TPM's
+        /// register window yet, so this should only be set for instances that
+        /// actually have a TPM device.
+        pub tpm: bool,
     }
 
     /// An inclusive range of address to be used for PCI MMIO.
@@ -1352,6 +1360,105 @@ pub mod formats {
             // Values are checked on creation to ensure the subtraction doesn't
             // underflow.
             self.end - self.base + 1
+        }
+    }
+
+    #[cfg(test)]
+    mod test_acpi_tables {
+        use super::*;
+
+        /// Build the full set of tables for a minimal instance.
+        fn build(tpm: bool) -> Vec<u8> {
+            let device_metadata = DeviceMetadataMap::new();
+            let config = AcpiConfig {
+                acpi_variant: acpi::AcpiVariant::V0,
+                num_cpus: 1,
+                pci_window_32: PciWindow::new(0xc000_0000, 0xfffb_ffff)
+                    .unwrap(),
+                pci_window_64: PciWindow::empty(),
+                dsdt_generators: &[],
+                device_metadata: &device_metadata,
+                tpm,
+            };
+
+            match AcpiTablesBuilder::new(&config).build().tables {
+                Entry::Bytes(v) => v,
+                other => panic!("Unexpected entry type: {other:?}"),
+            }
+        }
+
+        /// Find the offsets of a table signature in the generated blob.
+        ///
+        /// A simple scan is enough here: the signatures looked for are
+        /// distinctive enough not to collide with the AML bodies in this
+        /// small blob.
+        fn find(tables: &[u8], sig: &[u8; 4]) -> Vec<usize> {
+            tables
+                .windows(4)
+                .enumerate()
+                .filter(|(_, w)| *w == sig.as_slice())
+                .map(|(i, _)| i)
+                .collect()
+        }
+
+        /// Read a table's length out of its header.
+        fn table_len(tables: &[u8], offset: usize) -> usize {
+            u32::from_le_bytes(
+                tables[offset + 4..offset + 8].try_into().unwrap(),
+            ) as usize
+        }
+
+        /// Without a TPM, neither the TPM2 table nor the TPM device appear.
+        #[test]
+        fn no_tpm() {
+            let tables = build(false);
+
+            assert!(find(&tables, b"TPM2").is_empty());
+            assert!(!tables.windows(4).any(|w| w == b"TPM_"));
+            assert!(!tables.windows(8).any(|w| w == b"MSFT0101"));
+        }
+
+        /// With a TPM, exactly one TPM2 table is emitted, and the DSDT gains a
+        /// matching TPM device.
+        #[test]
+        fn with_tpm() {
+            let tables = build(true);
+
+            let offsets = find(&tables, b"TPM2");
+            assert_eq!(offsets.len(), 1, "expected exactly one TPM2 table");
+            let tpm2_offset = offsets[0];
+
+            // The table is the short revision 1 form, and its checksum still
+            // stands after being placed into the blob.
+            let len = table_len(&tables, tpm2_offset);
+            assert_eq!(len, 52);
+            assert_eq!(
+                tables[tpm2_offset..tpm2_offset + len]
+                    .iter()
+                    .fold(0u8, |acc, b| acc.wrapping_add(*b)),
+                0,
+            );
+
+            // The DSDT declares the matching device.
+            assert!(tables.windows(4).any(|w| w == b"TPM_"));
+            assert!(tables.windows(8).any(|w| w == b"MSFT0101"));
+        }
+
+        /// The TPM2 table is linked into the XSDT, which grows by exactly one
+        /// entry when a TPM is present.
+        #[test]
+        fn tpm2_linked_into_xsdt() {
+            let xsdt_entries = |tpm| {
+                let tables = build(tpm);
+                let offsets = find(&tables, b"XSDT");
+                assert_eq!(offsets.len(), 1, "expected exactly one XSDT");
+
+                let len = table_len(&tables, offsets[0]);
+                (len - acpi::XSDT_HEADER_LEN) / size_of::<u64>()
+            };
+
+            assert_eq!(xsdt_entries(false), 3);
+            assert_eq!(xsdt_entries(true), 4);
         }
     }
 
@@ -1459,12 +1566,18 @@ pub mod formats {
             let madt_offset = self.add_madt();
             let ssdt_offset = self.add_ssdt_edk2();
 
+            // The TPM2 table is only present when the instance has a TPM. The
+            // DSDT above is generated with a matching TPM device.
+            let tpm2_offset =
+                if self.config.tpm { Some(self.add_tpm2()) } else { None };
+
             // OVMF actually ignores the XSDT and RSDP tables provided via
             // fw_cfg and always generates its own versions, but include them
             // here regardless for completeness.
             //
             // https://github.com/oxidecomputer/edk2/blob/f33871f488bfbbc080e0f7e3881e04d0db0b6367/OvmfPkg/AcpiPlatformDxe/QemuFwCfgAcpi.c#L891-L899
-            let xsdt_entries = vec![fadt_offset, madt_offset, ssdt_offset];
+            let mut xsdt_entries = vec![fadt_offset, madt_offset, ssdt_offset];
+            xsdt_entries.extend(tpm2_offset);
             let xsdt_offset = self.add_xsdt(xsdt_entries);
 
             self.add_rsdp(xsdt_offset);
@@ -1494,6 +1607,7 @@ pub mod formats {
                 acpi_variant: self.config.acpi_variant,
                 generators: self.config.dsdt_generators,
                 device_metadata: self.config.device_metadata,
+                tpm: self.config.tpm,
             };
             let dsdt = acpi::Dsdt::new(dsdt_config);
             let dsdt_offset = self.tables.len();
@@ -1601,6 +1715,25 @@ pub mod formats {
             madt.to_aml_bytes(&mut acpi::FileSink::new("./acpi/madt.dat"));
 
             madt_offset
+        }
+
+        fn add_tpm2(&mut self) -> usize {
+            let tpm2_config =
+                acpi::Tpm2Config { acpi_variant: self.config.acpi_variant };
+            let tpm2 = acpi::Tpm2::new(tpm2_config);
+            let tpm2_offset = self.tables.len();
+            tpm2.to_aml_bytes(&mut self.tables);
+
+            #[cfg(feature = "acpi-debug")]
+            tpm2.to_aml_bytes(&mut acpi::FileSink::new("./acpi/tpm2.dat"));
+
+            // The TPM2 table holds no pointers to other tables (its control
+            // area address is a fixed MMIO address, not a table address), so
+            // it needs no fixups, and nothing modifies it after generation, so
+            // its checksum still stands. The XSDT entry pointing at it is
+            // fixed up by `add_xsdt`.
+
+            tpm2_offset
         }
 
         fn add_xsdt(&mut self, entries: Vec<usize>) -> usize {

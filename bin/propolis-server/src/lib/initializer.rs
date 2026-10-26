@@ -1498,6 +1498,10 @@ impl MachineInitializer<'_> {
             pci_window_64: fwcfg::formats::PciWindow::empty(),
             dsdt_generators: &generators,
             device_metadata: &self.device_metadata,
+            // Propolis has no TPM device to back these tables with yet, so
+            // instances are not told they have a TPM. This becomes a property
+            // of the instance spec once there is a device to attach.
+            tpm: false,
         };
         let acpi_tables = fwcfg::formats::AcpiTablesBuilder::new(config);
         Ok(acpi_tables.build())

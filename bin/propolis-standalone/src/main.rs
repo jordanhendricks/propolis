@@ -1107,6 +1107,7 @@ fn generate_acpi_tables(
     lowmem: usize,
     inventory: &Inventory,
     device_metadata: &DeviceMetadataMap,
+    tpm: bool,
     log: &slog::Logger,
 ) -> anyhow::Result<fwcfg::formats::AcpiTables> {
     slog::info!(log, "Generating ACPI tables with variant {:?}", acpi_variant);
@@ -1136,6 +1137,7 @@ fn generate_acpi_tables(
         pci_window_64: fwcfg::formats::PciWindow::empty(),
         dsdt_generators: &generators,
         device_metadata,
+        tpm,
     };
     let acpi_tables = fwcfg::formats::AcpiTablesBuilder::new(config);
 
@@ -1548,6 +1550,7 @@ fn setup_instance(
         lowmem,
         &guard.inventory,
         &device_metadata,
+        config.main.tpm,
         log,
     )
     .expect("can build ACPI tables");

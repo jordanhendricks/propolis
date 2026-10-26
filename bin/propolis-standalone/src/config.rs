@@ -84,6 +84,16 @@ pub struct Main {
     /// Default: Bhyve
     #[serde(default)]
     pub hv_interface: HypervisorInterface,
+
+    /// Advertise a TPM 2.0 to the guest via the ACPI tables
+    ///
+    /// Propolis does not emulate a TPM yet, so a guest told that one exists
+    /// will find the device and then fail to talk to it. This is here to
+    /// exercise the table generation, not to give guests a working TPM.
+    ///
+    /// Default: false
+    #[serde(default)]
+    pub tpm: bool,
 }
 
 /// The hypervisor interface to present to guest OSes.

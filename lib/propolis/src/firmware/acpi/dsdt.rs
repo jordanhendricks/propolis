@@ -37,6 +37,7 @@
 use std::cell::RefCell;
 
 use super::aml::{devids, methods, names, paths, *};
+use super::tpm2::TpmDevice;
 use super::{
     AcpiVariant, GPE0_BLK_ADDR, GPE0_BLK_LEN, IO_APIC_ADDR, IO_APIC_LEN,
     LOCAL_APIC_ADDR, LOCAL_APIC_LEN, PCI_LINK_IRQS,
@@ -146,6 +147,13 @@ pub struct DsdtConfig<'a> {
 
     /// Storage for device metadata.
     pub device_metadata: &'a DeviceMetadataMap,
+
+    /// Whether to declare a TPM device in the `\_SB` scope.
+    ///
+    /// This must agree with whether a TPM2 table is generated: the device and
+    /// the table describe the same TPM to the guest, and a guest that finds
+    /// one without the other cannot use it.
+    pub tpm: bool,
 }
 
 /// The DSDT table is part of the fixed ACPI tables and is used to describe
@@ -216,18 +224,23 @@ impl<'a> Aml for Dsdt<'a> {
         SleepState::new("_S5_", PM1A_CNT_SLP_TYP_S5).to_aml_bytes(&mut dsdt);
 
         // System bus namespace (\_SB).
-        aml::Scope::new(
-            "_SB_".into(),
-            vec![
-                &PciRootBridge { dsdt: &self },
-                &DsdtGeneratorAml {
-                    dsdt: &self,
-                    scope: DsdtScope::SystemBus,
-                    device_type: None,
-                },
-            ],
-        )
-        .to_aml_bytes(&mut dsdt);
+        let pci_root = PciRootBridge { dsdt: &self };
+        let tpm = TpmDevice {};
+        let sb_generators = DsdtGeneratorAml {
+            dsdt: &self,
+            scope: DsdtScope::SystemBus,
+            device_type: None,
+        };
+
+        let mut sb: Vec<&dyn Aml> = vec![&pci_root];
+        // The TPM hangs off the system bus rather than off either bridge, so
+        // it is declared here instead of alongside the LPC devices.
+        if self.config.tpm {
+            sb.push(&tpm);
+        }
+        sb.push(&sb_generators);
+
+        aml::Scope::new("_SB_".into(), sb).to_aml_bytes(&mut dsdt);
 
         // DSDT table.
         let mut sdt = dsdt_sdt_edk2_style();
@@ -1204,6 +1217,7 @@ mod test {
             acpi_variant: AcpiVariant::V0,
             generators: &generators,
             device_metadata: &device_metadata,
+            tpm: false,
         });
 
         // Filter by SystemBus.
@@ -1285,6 +1299,7 @@ mod test {
             acpi_variant: AcpiVariant::V0,
             generators: &generators,
             device_metadata: &device_metadata,
+            tpm: false,
         });
 
         // Generate AML code without calling the lpc_uart generator.
@@ -1297,8 +1312,7 @@ mod test {
         .to_aml_bytes(&mut sink);
     }
 
-    #[test]
-    fn dsdt_valid_aml() {
+    fn dsdt_aml(tpm: bool) -> Vec<u8> {
         let device_metadata = DeviceMetadataMap::new();
         let dsdt = Dsdt::new(DsdtConfig {
             acpi_variant: AcpiVariant::V0,
@@ -1314,15 +1328,36 @@ mod test {
                 &MockDsdtGenerator { scope: DsdtScope::Lpc, device_type: None },
             ],
             device_metadata: &device_metadata,
+            tpm,
         });
         let mut aml = Vec::new();
         dsdt.to_aml_bytes(&mut aml);
+        aml
+    }
+
+    #[test]
+    fn dsdt_valid_aml() {
+        let aml = dsdt_aml(false);
 
         // Look for key elements.
         assert!(aml.windows(4).any(|w| w == b"_SB_"));
         assert!(aml.windows(4).any(|w| w == b"PCI0"));
         assert!(aml.windows(4).any(|w| w == b"_PRT"));
         assert!(aml.windows(4).any(|w| w == b"LPC_"));
+    }
+
+    /// The TPM device is only declared when the instance has a TPM, so that
+    /// tables for instances without one are unchanged.
+    #[test]
+    fn dsdt_tpm_device() {
+        let mut tpm_aml = Vec::new();
+        super::super::tpm2::TpmDevice {}.to_aml_bytes(&mut tpm_aml);
+
+        let with_tpm = dsdt_aml(true);
+        assert!(with_tpm.windows(tpm_aml.len()).any(|w| w == tpm_aml));
+
+        let without_tpm = dsdt_aml(false);
+        assert!(!without_tpm.windows(4).any(|w| w == b"TPM_"));
     }
 
     #[test]
